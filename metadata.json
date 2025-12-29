@@ -1,0 +1,7 @@
+{
+  "name": "Blackbird Codec",
+  "description": "A reversible speech-to-birdsong audio codec with a minimalist aesthetic.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
