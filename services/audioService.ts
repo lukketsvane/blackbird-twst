@@ -255,50 +255,57 @@ export const playBuffer = async (buffer: AudioBuffer): Promise<void> => {
   source.start();
 };
 
-export const downloadBuffer = (buffer: AudioBuffer, filename: string) => {
-    // Simple WAV export
-    const numChannels = buffer.numberOfChannels;
-    const sampleRate = buffer.sampleRate;
-    const format = 1; // PCM
-    const bitDepth = 16;
-    
-    const data = buffer.getChannelData(0);
-    const dataLength = data.length * 2;
-    const headerLength = 44;
-    const totalLength = headerLength + dataLength;
-    const arrayBuffer = new ArrayBuffer(totalLength);
-    const view = new DataView(arrayBuffer);
+export const bufferToWavBlob = (buffer: AudioBuffer): Blob => {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const format = 1; // PCM
+  const bitDepth = 16;
+  
+  const data = buffer.getChannelData(0);
+  const dataLength = data.length * 2;
+  const headerLength = 44;
+  const totalLength = headerLength + dataLength;
+  const arrayBuffer = new ArrayBuffer(totalLength);
+  const view = new DataView(arrayBuffer);
 
-    const writeString = (o: number, s: string) => {
-      for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i));
-    };
+  const writeString = (o: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i));
+  };
 
-    writeString(0, 'RIFF');
-    view.setUint32(4, totalLength - 8, true);
-    writeString(8, 'WAVE');
-    writeString(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, format, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * numChannels * 2, true);
-    view.setUint16(32, numChannels * 2, true);
-    view.setUint16(34, bitDepth, true);
-    writeString(36, 'data');
-    view.setUint32(40, dataLength, true);
+  writeString(0, 'RIFF');
+  view.setUint32(4, totalLength - 8, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * 2, true);
+  view.setUint16(32, numChannels * 2, true);
+  view.setUint16(34, bitDepth, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataLength, true);
 
-    let offset = 44;
-    for (let i = 0; i < data.length; i++) {
-      const s = Math.max(-1, Math.min(1, data[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-      offset += 2;
-    }
+  let offset = 44;
+  for (let i = 0; i < data.length; i++) {
+    const s = Math.max(-1, Math.min(1, data[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
 
-    const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
+};
+
+export const downloadBlob = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+};
+
+export const downloadBuffer = (buffer: AudioBuffer, filename: string) => {
+    const blob = bufferToWavBlob(buffer);
+    downloadBlob(blob, filename);
 };

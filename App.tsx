@@ -1,545 +1,653 @@
 import React, { useState, useRef, useEffect } from 'react';
 import * as AudioService from './services/audioService';
+import * as StorageService from './services/storageService';
 import { Diagram } from './components/Diagram';
-import { Download, Play, Mic, Square, Upload, Lock, Unlock, Zap, Info, X, Pause, Activity } from 'lucide-react';
+import { 
+  Mic, Upload, Zap, Lock, Unlock, Play, Pause, 
+  Power, Download, Fingerprint, RefreshCw, X, Info,
+  History, Trash2, Calendar
+} from 'lucide-react';
 
-type Mode = 'idle' | 'recording' | 'playing' | 'encoding' | 'decoding';
-type VisualizerMode = 'bars' | 'spectrogram';
+type Tab = 'encode' | 'decode';
+type InputType = 'mic' | 'file';
+type AppState = 'idle' | 'recording' | 'recorded' | 'processing' | 'completed' | 'playing';
 
-export default function BirdsongCodec() {
-  const [mode, setMode] = useState<Mode>('idle');
-  const [status, setStatus] = useState('IDLE');
+export default function App() {
+  // --- State ---
+  const [tab, setTab] = useState<Tab>('encode');
+  const [inputType, setInputType] = useState<InputType>('mic');
+  const [appState, setAppState] = useState<AppState>('idle');
+  const [statusText, setStatusText] = useState('READY');
   
-  // Data State
-  const [recordedAudio, setRecordedAudio] = useState<AudioBuffer | null>(null);
-  const [encodedAudio, setEncodedAudio] = useState<AudioBuffer | null>(null);
-  const [decodedAudio, setDecodedAudio] = useState<AudioBuffer | null>(null);
-  
+  // Audio Buffers
+  const [sourceAudio, setSourceAudio] = useState<AudioBuffer | null>(null);
+  const [processedAudio, setProcessedAudio] = useState<AudioBuffer | null>(null); // The result (birdsong or speech)
+
   // UI State
   const [showInfo, setShowInfo] = useState(false);
-  const [activePlayback, setActivePlayback] = useState<'input'|'encoded'|'decoded'|null>(null);
-  const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('bars');
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyItems, setHistoryItems] = useState<StorageService.HistoryItem[]>([]);
+  const [isPlaying, setIsPlaying] = useState(false);
 
-  // Audio Refs
+  // Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  
-  const animationRef = useRef<number>(0);
+  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+  const streamNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animationRef = useRef<number>(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Initialization ---
+  // --- Init ---
   useEffect(() => {
-    const handleResize = () => {
-        if (canvasRef.current) {
-            const parent = canvasRef.current.parentElement;
-            if (parent) {
-                // High DPI for Retina Displays
-                const dpr = window.devicePixelRatio || 2;
-                canvasRef.current.width = parent.clientWidth * dpr;
-                canvasRef.current.height = parent.clientHeight * dpr;
-            }
-        }
-    };
-    window.addEventListener('resize', handleResize);
-    setTimeout(handleResize, 100);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-      cancelAnimationFrame(animationRef.current);
-    };
+    StorageService.getHistoryItems().then(setHistoryItems);
   }, []);
 
+  // --- Audio Context & Analyser ---
   const ensureAnalyser = () => {
     const ctx = AudioService.getAudioContext();
     if (!analyserRef.current) {
       analyserRef.current = ctx.createAnalyser();
-      analyserRef.current.fftSize = 512; // Higher res for sharper look
-      analyserRef.current.smoothingTimeConstant = 0.5;
+      analyserRef.current.fftSize = 256;
+      analyserRef.current.smoothingTimeConstant = 0.7;
     }
     return analyserRef.current;
   };
 
   const stopAudio = () => {
-    cancelAnimationFrame(animationRef.current);
-    if (sourceRef.current) {
-      try { sourceRef.current.stop(); } catch(e) {}
-      try { sourceRef.current.disconnect(); } catch(e) {}
-      sourceRef.current = null;
+    if (sourceNodeRef.current) {
+      try { sourceNodeRef.current.stop(); } catch(e) {}
+      sourceNodeRef.current = null;
     }
-    if (mediaStreamSourceRef.current) {
-      try { mediaStreamSourceRef.current.disconnect(); } catch(e) {}
-      mediaStreamSourceRef.current = null;
-    }
-    setActivePlayback(null);
-    // Reset visualizer to idle state
-    drawVisualizer(false);
+    setIsPlaying(false);
   };
 
-  // --- High Contrast Visualizer ---
-  const drawVisualizer = (isActive: boolean) => {
-    const canvas = canvasRef.current;
-    const analyser = analyserRef.current;
-    if (!canvas || !analyser) return;
+  // --- Visualizer ---
+  useEffect(() => {
+    const draw = () => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+        const width = canvas.width;
+        const height = canvas.height;
 
-    const width = canvas.width;
-    const height = canvas.height;
-    
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    analyser.getByteFrequencyData(dataArray);
+        // Clear with a slight trail effect for CRT feel
+        ctx.fillStyle = 'rgba(10, 10, 10, 0.3)';
+        ctx.fillRect(0, 0, width, height);
 
-    if (visualizerMode === 'bars') {
-        // Clear
-        ctx.clearRect(0, 0, width, height);
+        // Draw Grid (Static) is handled by CSS, we draw waveform/spectrum here
+        if (analyserRef.current && (appState === 'recording' || isPlaying || appState === 'processing')) {
+            const bufferLength = analyserRef.current.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyserRef.current.getByteFrequencyData(dataArray);
 
-        const barCount = 64; // More bars for density
-        const step = Math.floor(bufferLength / barCount);
-        const barWidth = (width / barCount); 
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#F59E0B'; // Amber-500
+            ctx.beginPath();
 
-        ctx.fillStyle = isActive ? '#FFFFFF' : '#333333';
+            const sliceWidth = width * 1.0 / bufferLength;
+            let x = 0;
 
-        for (let i = 0; i < barCount; i++) {
-            let sum = 0;
-            for (let j=0; j<step; j++) {
-                sum += dataArray[i*step + j];
+            // Draw Spectrum Line
+            ctx.beginPath();
+            for(let i = 0; i < bufferLength; i++) {
+                const v = dataArray[i] / 255.0;
+                const y = height - (v * height * 0.8) - (height * 0.1); // Center slightly
+
+                if(i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+
+                x += sliceWidth;
             }
-            const avg = sum / step;
+            ctx.stroke();
 
-            // Sharp, mechanical movement
-            const val = isActive 
-                ? (avg / 255) 
-                : 0.05; 
-
-            const barHeight = Math.max(2, val * height);
-            const x = i * barWidth;
-            const y = height - barHeight;
-
-            // Crisp Rectangles
-            ctx.fillRect(x, y, barWidth - 2, barHeight); // -2 for gap
+            // Glow effect
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#F59E0B';
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        } else if (appState === 'completed' && !isPlaying) {
+             // Flat line
+             ctx.beginPath();
+             ctx.moveTo(0, height/2);
+             ctx.lineTo(width, height/2);
+             ctx.strokeStyle = '#333';
+             ctx.lineWidth = 1;
+             ctx.stroke();
         }
-    } else {
-        // SPECTROGRAM MODE
-        if (!isActive) return;
 
-        // Shift canvas content to the left
-        ctx.drawImage(canvas, -2, 0);
-
-        // Draw new column at the right edge
-        const stripWidth = 2;
-        const x = width - stripWidth;
-        
-        // Clear the new strip (background black)
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(x, 0, stripWidth, height);
-
-        // Draw frequency bins mapped to brightness
-        // We use the full resolution of the FFT (256 bins)
-        const barHeight = height / bufferLength;
-
-        for (let i = 0; i < bufferLength; i++) {
-            const value = dataArray[i];
-            const percent = value / 255;
-            
-            // Grayscale intensity
-            const brightness = Math.floor(percent * 255);
-            ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
-
-            // Draw from bottom (low freq) to top (high freq)
-            const y = height - ((i + 1) * barHeight); 
-            // Ensure at least 1px height to avoid gaps
-            const h = Math.max(1, barHeight);
-            
-            ctx.fillRect(x, y, stripWidth, h);
+        animationRef.current = requestAnimationFrame(draw);
+    };
+    
+    // Handle Canvas Size (DPI)
+    const handleResize = () => {
+        if(canvasRef.current && canvasRef.current.parentElement) {
+            const dpr = window.devicePixelRatio || 1;
+            canvasRef.current.width = canvasRef.current.parentElement.clientWidth * dpr;
+            canvasRef.current.height = canvasRef.current.parentElement.clientHeight * dpr;
         }
-    }
+    };
+    window.addEventListener('resize', handleResize);
+    handleResize();
+    draw();
+
+    return () => {
+        window.removeEventListener('resize', handleResize);
+        cancelAnimationFrame(animationRef.current);
+    };
+  }, [appState, isPlaying]);
+
+  // --- Handlers ---
+
+  const reset = () => {
+      stopAudio();
+      setSourceAudio(null);
+      setProcessedAudio(null);
+      setAppState('idle');
+      setStatusText('READY');
+      if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // --- Logic ---
+  const handleModeChange = (newTab: Tab) => {
+      reset();
+      setTab(newTab);
+      // Default inputs
+      if (newTab === 'decode') {
+          setInputType('file'); // Decode always starts with file for now (or mic if we supported listening to birds)
+          setStatusText('LOAD ARTIFACT');
+      } else {
+          setInputType('mic');
+          setStatusText('READY');
+      }
+  };
 
   const startRecording = async () => {
-    stopAudio();
-    try {
-      const ctx = AudioService.getAudioContext();
-      if (ctx.state === 'suspended') await ctx.resume();
+      if (inputType !== 'mic' || appState !== 'idle') return;
+      try {
+          const ctx = AudioService.getAudioContext();
+          if (ctx.state === 'suspended') await ctx.resume();
+          
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const mediaRecorder = new MediaRecorder(stream);
+          mediaRecorderRef.current = mediaRecorder;
+          chunksRef.current = [];
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      chunksRef.current = [];
-      
-      const analyser = ensureAnalyser();
-      const source = ctx.createMediaStreamSource(stream);
-      mediaStreamSourceRef.current = source;
-      source.connect(analyser);
-      
-      mediaRecorderRef.current.ondataavailable = (e) => chunksRef.current.push(e.data);
-      mediaRecorderRef.current.onstop = async () => {
-        if (mediaStreamSourceRef.current) {
-             try { mediaStreamSourceRef.current.disconnect(); } catch(e) {}
-             mediaStreamSourceRef.current = null;
-        }
-        stream.getTracks().forEach(track => track.stop());
+          // Connect for Visualizer
+          const source = ctx.createMediaStreamSource(stream);
+          streamNodeRef.current = source;
+          const analyser = ensureAnalyser();
+          source.connect(analyser);
 
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        try {
-            const arrayBuffer = await blob.arrayBuffer();
-            const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-            setRecordedAudio(audioBuffer);
-            setEncodedAudio(null);
-            setDecodedAudio(null);
-            setStatus('Recorded');
-        } catch (e) {
-            setStatus('Error');
-        }
-        setMode('idle');
-        cancelAnimationFrame(animationRef.current);
-        drawVisualizer(false);
-      };
-      
-      mediaRecorderRef.current.start();
-      setMode('recording');
-      setStatus('Recording...');
-      
-      const animate = () => {
-        if (mediaRecorderRef.current?.state === 'recording') {
-            drawVisualizer(true);
-            animationRef.current = requestAnimationFrame(animate);
-        }
-      };
-      animationRef.current = requestAnimationFrame(animate);
+          mediaRecorder.ondataavailable = (e) => chunksRef.current.push(e.data);
+          mediaRecorder.onstop = async () => {
+             // Cleanup stream
+             source.disconnect();
+             stream.getTracks().forEach(t => t.stop());
+             
+             // Decode
+             const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+             const arrayBuffer = await blob.arrayBuffer();
+             const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+             setSourceAudio(audioBuffer);
+             setAppState('recorded');
+             setStatusText('AUDIO CAPTURED');
+          };
 
-    } catch (err) {
-      console.error(err);
-      setStatus('No Mic');
-    }
+          mediaRecorder.start();
+          setAppState('recording');
+          setStatusText('RECORDING...');
+      } catch (e) {
+          console.error(e);
+          setStatusText('MIC ERROR');
+      }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-  };
-
-  const encode = async () => {
-    if (!recordedAudio) return;
-    stopAudio();
-    setMode('encoding');
-    setStatus('Encrypting...');
-    
-    await new Promise(r => setTimeout(r, 100));
-
-    try {
-      const out = await AudioService.encodeToBirdsong(recordedAudio);
-      setEncodedAudio(out);
-      setDecodedAudio(null);
-      setStatus('Encrypted');
-      setMode('idle');
-    } catch (e) { 
-        setStatus('Error'); 
-        setMode('idle');
-    } 
-  };
-
-  const decode = async () => {
-    if (!encodedAudio) return;
-    stopAudio();
-    setMode('decoding');
-    setStatus('Reviving...');
-    await new Promise(r => setTimeout(r, 100));
-
-    try {
-      const out = await AudioService.decodeFromBirdsong(encodedAudio);
-      setDecodedAudio(out);
-      setStatus('Revived');
-      setMode('idle');
-    } catch (e) { 
-        setStatus('Error'); 
-        setMode('idle');
-    }
-  };
-
-  const play = async (buffer: AudioBuffer, type: 'input' | 'encoded' | 'decoded') => {
-    if (activePlayback === type) {
-        stopAudio();
-        return; 
-    }
-    
-    stopAudio();
-    const ctx = AudioService.getAudioContext();
-    if (ctx.state === 'suspended') await ctx.resume();
-    
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    sourceRef.current = source;
-    
-    const analyser = ensureAnalyser();
-    source.connect(analyser);
-    analyser.connect(ctx.destination);
-    
-    source.onended = () => {
-        setMode('idle');
-        setActivePlayback(null);
-        cancelAnimationFrame(animationRef.current);
-        sourceRef.current = null;
-        drawVisualizer(false);
-    };
-    
-    source.start();
-    setMode('playing');
-    setActivePlayback(type);
-
-    const animate = () => {
-        drawVisualizer(true);
-        animationRef.current = requestAnimationFrame(animate);
-    };
-    animationRef.current = requestAnimationFrame(animate);
-  };
-
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, isArtifact: boolean) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    stopAudio();
-    try {
-        const ctx = AudioService.getAudioContext();
-        if (ctx.state === 'suspended') await ctx.resume();
-        const ab = await file.arrayBuffer();
-        const buffer = await ctx.decodeAudioData(ab);
-        
-        if (isArtifact) {
-            setEncodedAudio(buffer);
-            setRecordedAudio(null);
-            setDecodedAudio(null);
-            setStatus('Artifact Loaded');
-            play(buffer, 'encoded');
-        } else {
-            setRecordedAudio(buffer);
-            setEncodedAudio(null);
-            setDecodedAudio(null);
-            setStatus('Source Loaded');
-            play(buffer, 'input');
-        }
-    } catch (e) { setStatus('Invalid WAV'); }
-  };
-
-  const toggleVisualizerMode = () => {
-      setVisualizerMode(prev => prev === 'bars' ? 'spectrogram' : 'bars');
-      // If we are currently idle, we want to clear the canvas or redraw the idle state
-      if (mode === 'idle') {
-          const canvas = canvasRef.current;
-          if (canvas) {
-              const ctx = canvas.getContext('2d');
-              ctx?.clearRect(0, 0, canvas.width, canvas.height);
-              if (visualizerMode === 'spectrogram') {
-                  setTimeout(() => drawVisualizer(false), 0);
-              }
-          }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop();
       }
   };
-  
-  // Effect to handle mode switch cleanup/setup if needed
-  useEffect(() => {
-     if (mode === 'idle') {
-        // Redraw idle state when mode changes
-        drawVisualizer(false);
-     }
-  }, [visualizerMode]);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      
+      try {
+          setStatusText('LOADING...');
+          const ctx = AudioService.getAudioContext();
+          const ab = await file.arrayBuffer();
+          const buffer = await ctx.decodeAudioData(ab);
+          setSourceAudio(buffer);
+          setProcessedAudio(null);
+          setAppState('recorded'); // 'recorded' here just means 'source ready'
+          setStatusText('SOURCE LOADED');
+      } catch (err) {
+          setStatusText('INVALID FILE');
+      }
+  };
+
+  const processAudio = async () => {
+      if (!sourceAudio) return;
+      setAppState('processing');
+      setStatusText(tab === 'encode' ? 'ENCRYPTING...' : 'DECODING...');
+      
+      // Short delay to allow UI render
+      await new Promise(r => setTimeout(r, 100));
+
+      try {
+          let result: AudioBuffer;
+          if (tab === 'encode') {
+              result = await AudioService.encodeToBirdsong(sourceAudio);
+          } else {
+              result = await AudioService.decodeFromBirdsong(sourceAudio);
+          }
+          setProcessedAudio(result);
+          setAppState('completed');
+          setStatusText(tab === 'encode' ? 'ENCRYPTION COMPLETE' : 'DECRYPTION COMPLETE');
+          
+          // Save to History
+          const timestamp = Date.now();
+          const blob = AudioService.bufferToWavBlob(result);
+          const duration = result.duration;
+          const id = timestamp.toString() + Math.random().toString(36).substring(7); // simple id
+          const filename = tab === 'encode' ? `enc_${timestamp}.wav` : `dec_${timestamp}.wav`;
+          
+          const newItem: StorageService.HistoryItem = {
+              id, type: tab, timestamp, blob, duration, filename
+          };
+          
+          StorageService.saveHistoryItem(newItem).then(() => {
+              setHistoryItems(prev => [newItem, ...prev]);
+          });
+
+      } catch (e) {
+          setAppState('recorded');
+          setStatusText('PROCESS FAILED');
+      }
+  };
+
+  const playAudio = async (buffer: AudioBuffer) => {
+      stopAudio();
+      const ctx = AudioService.getAudioContext();
+      if (ctx.state === 'suspended') await ctx.resume();
+      
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      sourceNodeRef.current = source;
+      
+      const analyser = ensureAnalyser();
+      source.connect(analyser);
+      analyser.connect(ctx.destination);
+      
+      source.onended = () => setIsPlaying(false);
+      source.start();
+      setIsPlaying(true);
+  };
+
+  const handleHistoryPlay = async (item: StorageService.HistoryItem) => {
+    try {
+        const ab = await item.blob.arrayBuffer();
+        const ctx = AudioService.getAudioContext();
+        const buffer = await ctx.decodeAudioData(ab);
+        playAudio(buffer);
+        // We stay in the modal or close it? Let's close it so user can see visualizer
+        setShowHistory(false);
+        setAppState('playing');
+        setStatusText('PLAYING FROM LOG');
+        // Set as processed audio so "save" works on main screen if they want
+        setProcessedAudio(buffer);
+        setSourceAudio(null);
+    } catch(e) {
+        console.error("Playback failed", e);
+    }
+  };
+
+  const deleteLogItem = async (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      await StorageService.deleteHistoryItem(id);
+      setHistoryItems(prev => prev.filter(i => i.id !== id));
+  };
+
+  const clearLogs = async () => {
+      if(confirm("Purge all mission logs? This cannot be undone.")) {
+          await StorageService.clearAllHistory();
+          setHistoryItems([]);
+      }
+  };
+
+  // --- Render Helpers ---
 
   return (
-    <div className="fixed inset-0 bg-black text-white flex flex-col safe-pt safe-pb p-4 gap-3 overflow-hidden select-none">
+    <div className="min-h-screen bg-[#050505] text-[#eee] font-mono selection:bg-orange-500/30 flex items-center justify-center p-4 md:p-8 overflow-y-auto">
         
-        {/* 1. SPECTRAL ANALYSIS (Visualizer) */}
-        <div className="flex-[1.2] min-h-0 relative bg-black rounded-lg border border-[#333] overflow-hidden flex flex-col">
-             {/* Header */}
-            <div className="absolute top-4 left-4 right-4 flex justify-between items-center z-20">
-                <button 
-                    onClick={toggleVisualizerMode}
-                    className="text-xs font-medium text-[#666] tracking-tight hover:text-white transition-colors flex items-center gap-2"
-                >
-                    {visualizerMode === 'bars' ? 'Spectral Analysis' : 'Spectrogram'}
-                    <Activity size={10} className={visualizerMode === 'spectrogram' ? 'text-white' : 'text-[#333]'} />
-                </button>
-                <div className="flex items-center gap-2">
-                    <div className={`w-1.5 h-1.5 rounded-full ${mode === 'recording' || activePlayback ? 'bg-white' : 'bg-[#333]'}`} />
-                    <span className={`text-xs font-mono font-medium ${mode === 'recording' || activePlayback ? 'text-white' : 'text-[#444]'}`}>
-                        {status}
-                    </span>
-                </div>
-            </div>
+        {/* Main Device Chassis */}
+        <div className="w-full max-w-md bg-[#000000] rounded-[2.5rem] p-6 relative shadow-2xl border border-[#1a1a1a]">
             
-            {/* Bars Canvas */}
-            <div className={`flex-1 w-full relative flex ${visualizerMode === 'bars' ? 'items-end' : 'items-stretch'} justify-center px-4 pb-0`}>
-                 <canvas ref={canvasRef} className="w-full h-[70%] block" />
-            </div>
+            {/* Screws */}
+            <Screw className="top-5 left-5" />
+            <Screw className="top-5 right-5" />
+            <Screw className="bottom-5 left-5" />
+            <Screw className="bottom-5 right-5" />
 
-            {/* Info Button */}
-            <button 
-                onClick={() => setShowInfo(true)}
-                className="absolute top-4 right-4 p-1 text-[#666] hover:text-white transition-colors z-30"
-            >
-                <Info size={16} />
-            </button>
-        </div>
-
-        {/* 2. ACTION GRID */}
-        <div className="flex-1 min-h-[180px] grid grid-cols-2 gap-3">
-            
-            {/* ENCRYPTION CARD */}
-            <div className="relative bg-black rounded-lg border border-[#333] flex flex-col items-center justify-center gap-4 group hover:border-[#555] transition-colors">
+            {/* HEADER */}
+            <div className="mb-6 pl-2 pr-2 flex justify-between items-start z-10 relative">
+                <div>
+                    <div className="flex items-center gap-3 mb-1">
+                        <Fingerprint className="text-amber-600 w-6 h-6" />
+                        <h1 className="text-xl font-bold tracking-[0.15em] text-[#e0e0e0]">TURDUS-X1</h1>
+                    </div>
+                    <div className="text-[#444] text-[10px] tracking-[0.25em] font-medium ml-1">
+                        FIELD ENCRYPTOR UNIT
+                    </div>
+                </div>
                 
-                <label className="absolute top-3 right-3 p-2 text-[#444] hover:text-white cursor-pointer transition-colors active:scale-90 z-20">
-                    <Upload size={16} />
-                    <input type="file" accept=".wav,audio/wav,audio/*" onChange={(e) => handleUpload(e, false)} className="hidden" />
-                </label>
-
-                <div className="absolute top-4 left-4">
-                    <span className="text-xs font-medium text-[#666]">Encryption</span>
-                </div>
-
-                {!recordedAudio ? (
-                    <button
-                        onMouseDown={startRecording}
-                        onMouseUp={stopRecording}
-                        onTouchStart={startRecording}
-                        onTouchEnd={stopRecording}
-                        className={`
-                            w-16 h-16 rounded-full flex items-center justify-center transition-all duration-200 border
-                            ${mode === 'recording' 
-                                ? 'bg-white text-black border-white' 
-                                : 'bg-black text-white border-[#333] hover:bg-[#111] hover:border-[#666]'}
-                        `}
-                    >
-                        {mode === 'recording' ? <Square size={20} fill="currentColor" /> : <Mic size={24} />}
-                    </button>
-                ) : (
-                     <button
-                        onClick={encode}
-                        disabled={mode === 'encoding'}
-                        className="w-16 h-16 rounded-full flex items-center justify-center transition-all duration-200 bg-white text-black hover:scale-105"
-                    >
-                        <Zap size={24} fill="currentColor" />
-                    </button>
-                )}
-
-                <span className="text-[11px] font-medium text-[#666]">
-                    {mode === 'recording' ? 'Recording...' : recordedAudio ? (mode === 'encoding' ? 'Processing...' : 'Ready to Encrypt') : 'Hold to Record'}
-                </span>
-                
-                {recordedAudio && !mode && (
-                    <button onClick={() => setRecordedAudio(null)} className="absolute bottom-3 text-[10px] text-[#444] hover:text-white transition-colors font-medium">
-                        Discard
-                    </button>
-                )}
-            </div>
-
-            {/* DECRYPTION CARD */}
-            <div className="relative bg-black rounded-lg border border-[#333] flex flex-col items-center justify-center gap-4 hover:border-[#555] transition-colors">
-                 
-                <label className="absolute top-3 right-3 p-2 text-[#444] hover:text-white cursor-pointer transition-colors active:scale-90 z-20">
-                    <Upload size={16} />
-                    <input type="file" accept=".wav,audio/wav,audio/*" onChange={(e) => handleUpload(e, true)} className="hidden" />
-                </label>
-
-                <div className="absolute top-4 left-4">
-                    <span className="text-xs font-medium text-[#666]">Decryption</span>
-                </div>
-
-                <button
-                    onClick={decode}
-                    disabled={!encodedAudio || mode === 'decoding'}
-                    className={`
-                        w-16 h-16 rounded-full flex items-center justify-center transition-all duration-200 border
-                        ${encodedAudio 
-                            ? 'bg-white text-black border-white hover:scale-105' 
-                            : 'bg-[#050505] text-[#222] border-[#222] cursor-not-allowed'}
-                    `}
-                >
-                    {encodedAudio ? <Unlock size={24} /> : <Lock size={24} />}
-                </button>
-
-                <span className="text-[11px] font-medium text-[#666]">
-                    {mode === 'decoding' ? 'Processing...' : encodedAudio ? 'Ready to Revive' : 'Waiting for Data'}
-                </span>
-            </div>
-
-        </div>
-
-        {/* 3. ARTIFACT PLAYER */}
-        <div className="h-[72px] shrink-0 bg-black rounded-lg border border-[#333] flex items-center px-4 gap-4 relative overflow-hidden group hover:border-[#555] transition-colors">
-             {/* Active Progress */}
-             {activePlayback && (
-                <div className="absolute bottom-0 left-0 h-[2px] bg-white w-full animate-pulse opacity-50" />
-             )}
-
-             {/* Play Icon Box */}
-             <div className={`
-                w-10 h-10 rounded-md flex items-center justify-center shrink-0 transition-all duration-300 border
-                ${activePlayback ? 'bg-white text-black border-white' : 'bg-[#111] text-white border-[#333]'}
-             `}>
-                {activePlayback ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
-             </div>
-
-             {/* Info */}
-             <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5">
-                <div className="text-sm font-medium truncate text-white">
-                    {decodedAudio ? "revived_audio.wav" : encodedAudio ? "artifact_specimen.wav" : recordedAudio ? "source_input.wav" : "No File Loaded"}
-                </div>
-                <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-[#555] font-mono">
-                        {(decodedAudio || encodedAudio || recordedAudio)?.duration.toFixed(2) || "--"}s
-                    </span>
-                    {(decodedAudio || encodedAudio || recordedAudio) && (
-                         <span className="text-[9px] bg-[#222] text-[#888] px-1.5 py-px rounded font-medium">WAV</span>
-                    )}
-                </div>
-             </div>
-
-             {/* Actions */}
-             <div className="flex items-center gap-2">
-                 <button 
-                    onClick={() => {
-                        if (decodedAudio) play(decodedAudio, 'decoded');
-                        else if (encodedAudio) play(encodedAudio, 'encoded');
-                        else if (recordedAudio) play(recordedAudio, 'input');
-                    }}
-                    disabled={!encodedAudio && !recordedAudio && !decodedAudio}
-                    className="absolute inset-0 z-10 cursor-pointer"
-                    aria-label="Play Toggle"
-                 />
-
-                 <button 
-                    onClick={(e) => {
-                        e.stopPropagation(); 
-                        if (decodedAudio) AudioService.downloadBuffer(decodedAudio, 'revived.wav');
-                        else if (encodedAudio) AudioService.downloadBuffer(encodedAudio, 'artifact.wav');
-                        else if (recordedAudio) AudioService.downloadBuffer(recordedAudio, 'source.wav');
-                    }}
-                    disabled={!encodedAudio && !recordedAudio && !decodedAudio}
-                    className="p-2 text-[#444] hover:text-white z-20 transition-colors active:scale-90"
-                >
-                    <Download size={18} />
-                 </button>
-             </div>
-        </div>
-
-      {/* Info Modal */}
-      {showInfo && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-200">
-            <div className="w-full max-w-lg bg-black border border-[#333] rounded-lg p-6 shadow-2xl">
-                <div className="flex justify-between items-center mb-6">
-                     <h2 className="text-sm font-semibold text-white">System Architecture</h2>
-                     <button onClick={() => setShowInfo(false)} className="text-[#666] hover:text-white">
-                        <X size={18} />
+                <div className="flex gap-2">
+                     <button onClick={() => setShowHistory(true)} className="p-2 rounded-full hover:bg-[#111] text-[#444] hover:text-[#888] transition-colors relative">
+                        <History size={16} />
+                        {historyItems.length > 0 && <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-amber-600 rounded-full" />}
                      </button>
+                     <button onClick={() => setShowInfo(true)} className="p-2 rounded-full hover:bg-[#111] text-[#444] hover:text-[#888] transition-colors">
+                        <Info size={16} />
+                     </button>
+                     <div className={`w-3 h-3 rounded-full mt-2 ${appState !== 'idle' ? 'bg-amber-600 shadow-[0_0_8px_rgba(217,119,6,0.6)]' : 'bg-[#222]'}`} />
                 </div>
-                <Diagram />
             </div>
-        </div>
-      )}
 
+            {/* SCREEN (VISUALIZER) */}
+            <div className="relative w-full aspect-[4/3] bg-[#080808] rounded-2xl border border-[#222] mb-8 overflow-hidden group">
+                 {/* Grid Overlay */}
+                 <div className="absolute inset-0 opacity-10 pointer-events-none" 
+                     style={{ 
+                         backgroundImage: `
+                             linear-gradient(rgba(245, 158, 11, 0.3) 1px, transparent 1px), 
+                             linear-gradient(90deg, rgba(245, 158, 11, 0.3) 1px, transparent 1px)
+                         `, 
+                         backgroundSize: '24px 24px' 
+                     }}>
+                 </div>
+                 
+                 {/* Vignette */}
+                 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_50%,rgba(0,0,0,0.6)_100%)] pointer-events-none" />
+
+                 {/* Corner UI Text */}
+                 <div className="absolute top-4 left-4 text-[10px] font-bold text-amber-700 tracking-wider">
+                     MODE: <span className="text-amber-500">{tab.toUpperCase()}</span>
+                 </div>
+                 <div className="absolute top-4 right-4 text-[10px] font-bold text-amber-700 tracking-wider">
+                     INPUT: <span className="text-amber-500">{tab === 'decode' ? 'ARTIFACT' : inputType.toUpperCase()}</span>
+                 </div>
+
+                 {/* Main Status Text (Centered) */}
+                 {appState === 'idle' && !sourceAudio && (
+                     <div className="absolute inset-0 flex flex-col items-center justify-center text-amber-900/40 pointer-events-none">
+                         <ActivityIcon />
+                         <span className="mt-2 text-xs tracking-widest">SYSTEM READY</span>
+                     </div>
+                 )}
+                 
+                 {/* Canvas */}
+                 <canvas ref={canvasRef} className="absolute inset-0 w-full h-full mix-blend-screen opacity-90" />
+                 
+                 {/* Status Bar Bottom */}
+                 <div className="absolute bottom-0 left-0 right-0 h-8 bg-[#0a0a0a]/90 border-t border-[#222] flex items-center justify-between px-4 text-[10px] text-[#555]">
+                      <span>STATUS: <span className="text-amber-500/80">{statusText}</span></span>
+                      <span>{sourceAudio ? `${sourceAudio.duration.toFixed(1)}s` : '--'}</span>
+                 </div>
+            </div>
+
+            {/* CONTROLS PANEL */}
+            <div className="bg-[#0b0b0b] rounded-[2rem] border border-[#1a1a1a] p-1 pb-2 shadow-inner">
+                <div className="bg-[#050505] rounded-[1.8rem] border border-[#222] p-5 pb-8 relative overflow-hidden">
+                    
+                    {/* Top Control Row */}
+                    <div className="flex justify-between items-center mb-8 pb-6 border-b border-[#1a1a1a]">
+                        
+                        {/* Mode Switcher */}
+                        <div className="flex bg-[#0a0a0a] rounded-lg p-1 border border-[#222] shadow-sm">
+                            <button 
+                                onClick={() => handleModeChange('encode')}
+                                className={`px-4 py-2 rounded-md text-[10px] font-bold tracking-wide transition-all duration-300 ${tab === 'encode' ? 'bg-[#1a1a1a] text-amber-500 shadow-sm border border-[#2a2a2a]' : 'text-[#444] hover:text-[#666]'}`}
+                            >
+                                ENCODE
+                            </button>
+                            <button 
+                                onClick={() => handleModeChange('decode')}
+                                className={`px-4 py-2 rounded-md text-[10px] font-bold tracking-wide transition-all duration-300 ${tab === 'decode' ? 'bg-[#1a1a1a] text-amber-500 shadow-sm border border-[#2a2a2a]' : 'text-[#444] hover:text-[#666]'}`}
+                            >
+                                DECODE
+                            </button>
+                        </div>
+
+                        {/* Input Switcher (Only visible in Encode mode usually, but simplified here) */}
+                        <div className="flex gap-2">
+                             {tab === 'encode' && (
+                                <>
+                                    <InputButton active={inputType === 'mic'} onClick={() => { if(appState === 'idle') setInputType('mic'); }}>
+                                        <Mic size={14} />
+                                    </InputButton>
+                                    <InputButton active={inputType === 'file'} onClick={() => { if(appState === 'idle') setInputType('file'); }}>
+                                        <Upload size={14} />
+                                    </InputButton>
+                                </>
+                             )}
+                             {tab === 'decode' && (
+                                 <InputButton active={true} onClick={() => {}}>
+                                     <Upload size={14} />
+                                 </InputButton>
+                             )}
+                        </div>
+                    </div>
+
+                    {/* Hidden File Input */}
+                    <input 
+                        type="file" 
+                        ref={fileInputRef}
+                        accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac,.webm" 
+                        className="hidden" 
+                        onChange={handleFileUpload} 
+                    />
+
+                    {/* Main Interaction Area */}
+                    <div className="flex flex-col items-center justify-center gap-6">
+                        
+                        {/* THE BIG BUTTON */}
+                        <div className="relative group">
+                            {/* Outer Glow Ring */}
+                            <div className={`absolute -inset-4 rounded-full bg-amber-600/5 blur-xl transition-opacity duration-500 ${appState === 'recording' || appState === 'processing' ? 'opacity-100' : 'opacity-0'}`} />
+                            
+                            <button
+                                onMouseDown={inputType === 'mic' && appState === 'idle' ? startRecording : undefined}
+                                onMouseUp={inputType === 'mic' && appState === 'recording' ? stopRecording : undefined}
+                                onTouchStart={inputType === 'mic' && appState === 'idle' ? startRecording : undefined}
+                                onTouchEnd={inputType === 'mic' && appState === 'recording' ? stopRecording : undefined}
+                                onClick={() => {
+                                    if (inputType === 'file' && appState === 'idle') {
+                                        fileInputRef.current?.click();
+                                    } else if (appState === 'recorded') {
+                                        processAudio();
+                                    } else if (appState === 'completed' && processedAudio) {
+                                        playAudio(processedAudio);
+                                    }
+                                }}
+                                disabled={appState === 'processing'}
+                                className={`
+                                    w-24 h-24 rounded-full flex flex-col items-center justify-center border-2 transition-all duration-200 shadow-2xl relative z-10
+                                    ${appState === 'recording' ? 'bg-[#e0e0e0] border-[#fff] scale-95' : 'bg-[#0a0a0a] hover:bg-[#111]'}
+                                    ${(appState === 'recorded' || appState === 'completed') ? 'border-amber-600/50 shadow-[0_0_15px_rgba(217,119,6,0.2)]' : 'border-[#222]'}
+                                    disabled:opacity-50 disabled:cursor-not-allowed
+                                `}
+                            >
+                                {renderMainButtonContent(appState, tab, inputType, isPlaying)}
+                            </button>
+                            
+                            {/* Label under button */}
+                            <div className="absolute -bottom-8 left-0 right-0 text-center text-[9px] font-bold tracking-[0.2em] text-[#333]">
+                                {appState === 'idle' && inputType === 'mic' ? 'HOLD' : 'PRESS'}
+                            </div>
+                        </div>
+
+                        {/* Secondary Actions (Reset / Download) */}
+                        <div className="h-8 flex items-center gap-4">
+                            {(appState === 'completed' || appState === 'recorded') && (
+                                <>
+                                    <button onClick={reset} className="text-[#444] hover:text-[#888] transition-colors" title="Reset">
+                                        <RefreshCw size={16} />
+                                    </button>
+                                    
+                                    {appState === 'completed' && processedAudio && (
+                                        <button 
+                                            onClick={() => AudioService.downloadBuffer(processedAudio, tab === 'encode' ? 'birdsong_artifact.wav' : 'recovered_speech.wav')} 
+                                            className="text-amber-600 hover:text-amber-400 transition-colors flex items-center gap-2 text-xs font-bold tracking-wider"
+                                        >
+                                            <Download size={16} />
+                                            SAVE
+                                        </button>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+
+        {/* LOGS MODAL */}
+        {showHistory && (
+             <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-200">
+                <div className="w-full max-w-lg bg-[#0a0a0a] border border-[#333] rounded-2xl p-6 shadow-2xl relative flex flex-col max-h-[80vh]">
+                    <div className="flex justify-between items-center mb-6 shrink-0">
+                         <div>
+                            <h2 className="text-lg font-bold text-amber-500 mb-1 flex items-center gap-2">
+                                <History size={20} /> MISSION LOGS
+                            </h2>
+                            <p className="text-xs text-[#666]">STORED ARTIFACTS</p>
+                         </div>
+                         <div className="flex gap-2">
+                            {historyItems.length > 0 && (
+                                <button onClick={clearLogs} className="p-2 rounded-full bg-[#111] text-[#666] hover:text-red-500 transition-colors" title="Clear All">
+                                    <Trash2 size={16} />
+                                </button>
+                            )}
+                            <button onClick={() => setShowHistory(false)} className="p-2 rounded-full hover:bg-[#111] text-[#444] hover:text-white transition-colors">
+                                <X size={20} />
+                            </button>
+                         </div>
+                    </div>
+                    
+                    <div className="flex-1 overflow-y-auto min-h-0 space-y-2 pr-2 custom-scrollbar">
+                        {historyItems.length === 0 ? (
+                            <div className="h-40 flex flex-col items-center justify-center text-[#333] gap-2">
+                                <History size={32} strokeWidth={1} />
+                                <span className="text-xs tracking-widest">NO DATA LOGGED</span>
+                            </div>
+                        ) : (
+                            historyItems.map((item) => (
+                                <div key={item.id} className="bg-[#050505] border border-[#222] rounded-lg p-3 flex items-center gap-3 group hover:border-amber-900/50 transition-colors">
+                                    <div className={`w-8 h-8 rounded flex items-center justify-center bg-[#111] shrink-0 text-[#666] group-hover:text-amber-500`}>
+                                        {item.type === 'encode' ? <Zap size={14} /> : <Unlock size={14} />}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className="text-xs font-bold text-[#aaa] truncate">{item.filename}</div>
+                                        <div className="flex items-center gap-2 text-[10px] text-[#555] mt-0.5">
+                                            <span className="flex items-center gap-1"><Calendar size={10} /> {new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                            <span>•</span>
+                                            <span>{item.duration.toFixed(1)}s</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                        <button onClick={() => handleHistoryPlay(item)} className="p-2 text-[#444] hover:text-white hover:bg-[#111] rounded transition-colors">
+                                            <Play size={14} />
+                                        </button>
+                                        <button onClick={() => AudioService.downloadBlob(item.blob, item.filename)} className="p-2 text-[#444] hover:text-white hover:bg-[#111] rounded transition-colors">
+                                            <Download size={14} />
+                                        </button>
+                                        <button onClick={(e) => deleteLogItem(item.id, e)} className="p-2 text-[#444] hover:text-red-500 hover:bg-[#111] rounded transition-colors">
+                                            <Trash2 size={14} />
+                                        </button>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Info Modal */}
+        {showInfo && (
+            <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-200">
+                <div className="w-full max-w-lg bg-[#0a0a0a] border border-[#333] rounded-2xl p-6 shadow-2xl relative">
+                    <button onClick={() => setShowInfo(false)} className="absolute top-4 right-4 text-[#444] hover:text-white">
+                        <X size={20} />
+                    </button>
+                    <div className="mb-6">
+                         <h2 className="text-lg font-bold text-amber-500 mb-1">SYSTEM SCHEMATICS</h2>
+                         <p className="text-xs text-[#666]">TURDUS-X1 AUDIO ENCRYPTION PATH</p>
+                    </div>
+                    <Diagram />
+                </div>
+            </div>
+        )}
     </div>
   );
+}
+
+// --- Sub Components ---
+
+const Screw = ({ className }: { className?: string }) => (
+    <div className={`absolute w-3 h-3 rounded-full bg-[#151515] border border-[#2a2a2a] flex items-center justify-center ${className}`}>
+        <div className="w-1.5 h-[1px] bg-[#333] transform -rotate-45" />
+    </div>
+);
+
+const InputButton = ({ active, children, onClick }: { active: boolean, children?: React.ReactNode, onClick: () => void }) => (
+    <button 
+        onClick={onClick}
+        className={`w-8 h-8 rounded-full flex items-center justify-center transition-all border ${active ? 'bg-amber-900/20 border-amber-700/50 text-amber-500' : 'bg-[#0a0a0a] border-[#222] text-[#444] hover:border-[#333]'}`}
+    >
+        {children}
+    </button>
+);
+
+const ActivityIcon = () => (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+    </svg>
+);
+
+// Helper to determine what icon/text to show on the big button
+function renderMainButtonContent(state: AppState, tab: Tab, input: InputType, isPlaying: boolean) {
+    if (state === 'processing') return <div className="animate-spin text-amber-500"><RefreshCw size={24} /></div>;
+    
+    if (state === 'completed') {
+        if (isPlaying) return <Pause className="text-amber-500" size={32} fill="currentColor" />;
+        return <Play className="text-amber-500" size={32} fill="currentColor" />;
+    }
+
+    if (state === 'recorded') {
+        // Ready to process
+        return tab === 'encode' ? <Zap className="text-white" size={28} fill="currentColor" /> : <Unlock className="text-white" size={28} />;
+    }
+
+    // Idle State
+    if (state === 'idle') {
+        if (input === 'mic') {
+             // Recording Mode
+             return <Power className="text-[#333]" size={32} />;
+        } else {
+             // File Upload Mode
+             return <Upload className="text-[#333]" size={28} />;
+        }
+    }
+    
+    // Recording State
+    if (state === 'recording') {
+        return <div className="w-8 h-8 bg-black rounded shadow-sm" />;
+    }
+
+    return null;
 }
