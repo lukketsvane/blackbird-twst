@@ -258,7 +258,6 @@ export default function App() {
           });
 
       } catch (e) {
-          console.error(e);
           setAppState('recorded');
           setStatusText('PROCESS FAILED');
       }
@@ -355,7 +354,6 @@ export default function App() {
                 // AUTO PROCESS
                 runProcessing(audioBuffer);
              } catch(e) {
-                 console.error(e);
                  setStatusText('ERROR');
                  setAppState('idle');
              }
@@ -365,7 +363,6 @@ export default function App() {
           setAppState('recording');
           setStatusText('RECORDING...');
       } catch (e) {
-          console.error(e);
           setStatusText('MIC ERROR');
       }
   };
@@ -427,7 +424,6 @@ export default function App() {
         setProcessedAudio(buffer);
         setSourceAudio(null);
     } catch(e) {
-        // Error silently handled
     }
   };
 
