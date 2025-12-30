@@ -4,7 +4,8 @@ import * as StorageService from './services/storageService';
 import { 
   Mic, Upload, Zap, Lock, Unlock, Play, Pause, 
   Power, Download, Fingerprint, RefreshCw, X,
-  History, Trash2, Calendar, ChevronLeft, ChevronRight, Settings2
+  History, Trash2, Calendar, ChevronLeft, ChevronRight, Settings2,
+  Maximize2
 } from 'lucide-react';
 
 type Tab = 'encode' | 'decode';
@@ -190,6 +191,47 @@ export default function App() {
       return AudioService.DECODE_PRESETS[decodePresetIndex].description;
   };
 
+  const runProcessing = async (buffer: AudioBuffer) => {
+      setAppState('processing');
+      setStatusText(tab === 'encode' ? 'ENCRYPTING...' : 'DECODING...');
+      
+      // Short delay to allow UI render
+      await new Promise(r => setTimeout(r, 100));
+
+      try {
+          let result: AudioBuffer;
+          if (tab === 'encode') {
+              const preset = AudioService.ENCODE_PRESETS[encodePresetIndex];
+              result = await AudioService.encodeToBirdsong(buffer, preset);
+          } else {
+              const preset = AudioService.DECODE_PRESETS[decodePresetIndex];
+              result = await AudioService.decodeFromBirdsong(buffer, preset);
+          }
+          setProcessedAudio(result);
+          setAppState('completed');
+          setStatusText(tab === 'encode' ? 'ENCRYPTION COMPLETE' : 'DECRYPTION COMPLETE');
+          
+          // Save to History
+          const timestamp = Date.now();
+          const blob = AudioService.bufferToWavBlob(result);
+          const duration = result.duration;
+          const id = timestamp.toString() + Math.random().toString(36).substring(7); // simple id
+          const filename = tab === 'encode' ? `enc_${timestamp}.wav` : `dec_${timestamp}.wav`;
+          
+          const newItem: StorageService.HistoryItem = {
+              id, type: tab, timestamp, blob, duration, filename
+          };
+          
+          StorageService.saveHistoryItem(newItem).then(() => {
+              setHistoryItems(prev => [newItem, ...prev]);
+          });
+
+      } catch (e) {
+          setAppState('recorded');
+          setStatusText('PROCESS FAILED');
+      }
+  };
+
   const startRecording = async () => {
       if (inputType !== 'mic' || appState !== 'idle') return;
       try {
@@ -214,12 +256,21 @@ export default function App() {
              stream.getTracks().forEach(t => t.stop());
              
              // Decode
-             const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-             const arrayBuffer = await blob.arrayBuffer();
-             const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-             setSourceAudio(audioBuffer);
-             setAppState('recorded');
-             setStatusText('AUDIO CAPTURED');
+             setStatusText('PROCESSING...');
+             setAppState('processing');
+             
+             try {
+                const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+                const arrayBuffer = await blob.arrayBuffer();
+                const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+                setSourceAudio(audioBuffer);
+                // AUTO PROCESS
+                runProcessing(audioBuffer);
+             } catch(e) {
+                 console.error(e);
+                 setStatusText('ERROR');
+                 setAppState('idle');
+             }
           };
 
           mediaRecorder.start();
@@ -243,57 +294,16 @@ export default function App() {
       
       try {
           setStatusText('LOADING...');
+          setAppState('processing');
           const ctx = AudioService.getAudioContext();
           const ab = await file.arrayBuffer();
           const buffer = await ctx.decodeAudioData(ab);
           setSourceAudio(buffer);
-          setProcessedAudio(null);
-          setAppState('recorded'); // 'recorded' here just means 'source ready'
-          setStatusText('SOURCE LOADED');
+          // AUTO PROCESS
+          runProcessing(buffer);
       } catch (err) {
           setStatusText('INVALID FILE');
-      }
-  };
-
-  const processAudio = async () => {
-      if (!sourceAudio) return;
-      setAppState('processing');
-      setStatusText(tab === 'encode' ? 'ENCRYPTING...' : 'DECODING...');
-      
-      // Short delay to allow UI render
-      await new Promise(r => setTimeout(r, 100));
-
-      try {
-          let result: AudioBuffer;
-          if (tab === 'encode') {
-              const preset = AudioService.ENCODE_PRESETS[encodePresetIndex];
-              result = await AudioService.encodeToBirdsong(sourceAudio, preset);
-          } else {
-              const preset = AudioService.DECODE_PRESETS[decodePresetIndex];
-              result = await AudioService.decodeFromBirdsong(sourceAudio, preset);
-          }
-          setProcessedAudio(result);
-          setAppState('completed');
-          setStatusText(tab === 'encode' ? 'ENCRYPTION COMPLETE' : 'DECRYPTION COMPLETE');
-          
-          // Save to History
-          const timestamp = Date.now();
-          const blob = AudioService.bufferToWavBlob(result);
-          const duration = result.duration;
-          const id = timestamp.toString() + Math.random().toString(36).substring(7); // simple id
-          const filename = tab === 'encode' ? `enc_${timestamp}.wav` : `dec_${timestamp}.wav`;
-          
-          const newItem: StorageService.HistoryItem = {
-              id, type: tab, timestamp, blob, duration, filename
-          };
-          
-          StorageService.saveHistoryItem(newItem).then(() => {
-              setHistoryItems(prev => [newItem, ...prev]);
-          });
-
-      } catch (e) {
-          setAppState('recorded');
-          setStatusText('PROCESS FAILED');
+          setAppState('idle');
       }
   };
 
@@ -351,8 +361,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#050505] text-[#eee] font-mono selection:bg-orange-500/30 flex items-center justify-center p-4 md:p-8 overflow-y-auto">
         
-        {/* Main Device Chassis */}
-        <div className="w-full max-w-md bg-[#000000] rounded-[2.5rem] p-6 relative shadow-2xl border border-[#1a1a1a]">
+        {/* Main Device Chassis - Scaled 75% */}
+        <div className="transform scale-75 origin-center w-full max-w-md bg-[#000000] rounded-[2.5rem] p-6 relative shadow-2xl border border-[#1a1a1a]">
             
             {/* Screws */}
             <Screw className="top-5 left-5" />
@@ -425,7 +435,7 @@ export default function App() {
 
             {/* CONTROLS PANEL */}
             <div className="bg-[#0b0b0b] rounded-[2rem] border border-[#1a1a1a] p-1 pb-2 shadow-inner">
-                <div className="bg-[#050505] rounded-[1.8rem] border border-[#222] p-5 pb-8 relative overflow-hidden">
+                <div className="bg-[#050505] rounded-[1.8rem] border border-[#222] p-5 pb-8 relative overflow-hidden flex flex-col min-h-[300px]">
                     
                     {/* Top Control Row */}
                     <div className="flex justify-between items-center mb-6 border-b border-[#1a1a1a] pb-4">
@@ -446,7 +456,7 @@ export default function App() {
                             </button>
                         </div>
 
-                        {/* Input Switcher (Only visible in Encode mode usually, but simplified here) */}
+                        {/* Input Switcher */}
                         <div className="flex gap-2">
                              {tab === 'encode' && (
                                 <>
@@ -499,14 +509,13 @@ export default function App() {
                         onChange={handleFileUpload} 
                     />
 
-                    {/* Main Interaction Area */}
-                    <div className="flex flex-col items-center justify-center gap-6">
+                    {/* Main Interaction Area - NEW RECTANGULAR DESIGN */}
+                    <div className="flex-1 flex flex-col w-full h-full relative">
                         
-                        {/* THE BIG BUTTON */}
-                        <div className="relative group">
-                            {/* Outer Glow Ring */}
-                            <div className={`absolute -inset-4 rounded-full bg-amber-600/5 blur-xl transition-opacity duration-500 ${appState === 'recording' || appState === 'processing' ? 'opacity-100' : 'opacity-0'}`} />
+                        {/* Frame Works Ripple Container */}
+                        <div className="relative w-full h-full min-h-[160px] group">
                             
+                            {/* The Interaction Area */}
                             <button
                                 onMouseDown={inputType === 'mic' && appState === 'idle' ? startRecording : undefined}
                                 onMouseUp={inputType === 'mic' && appState === 'recording' ? stopRecording : undefined}
@@ -515,44 +524,69 @@ export default function App() {
                                 onClick={() => {
                                     if (inputType === 'file' && appState === 'idle') {
                                         fileInputRef.current?.click();
-                                    } else if (appState === 'recorded') {
-                                        processAudio();
                                     } else if (appState === 'completed' && processedAudio) {
                                         playAudio(processedAudio);
                                     }
                                 }}
                                 disabled={appState === 'processing'}
                                 className={`
-                                    w-24 h-24 rounded-full flex flex-col items-center justify-center border-2 transition-all duration-200 shadow-2xl relative z-10
-                                    ${appState === 'recording' ? 'bg-[#e0e0e0] border-[#fff] scale-95' : 'bg-[#0a0a0a] hover:bg-[#111]'}
-                                    ${(appState === 'recorded' || appState === 'completed') ? 'border-amber-600/50 shadow-[0_0_15px_rgba(217,119,6,0.2)]' : 'border-[#222]'}
-                                    disabled:opacity-50 disabled:cursor-not-allowed
+                                    w-full h-full rounded-xl border border-[#222] bg-[#080808]
+                                    flex flex-col items-center justify-center relative overflow-hidden transition-all duration-300
+                                    ${appState === 'idle' ? 'hover:border-amber-900/40 hover:bg-[#0a0a0a] cursor-pointer' : ''}
+                                    ${appState === 'recording' ? 'border-amber-600/50 bg-[#0a0a0a]' : ''}
+                                    ${appState === 'completed' ? 'border-green-900/30' : ''}
                                 `}
                             >
-                                {renderMainButtonContent(appState, tab, inputType, isPlaying)}
+                                {/* ABSTRACT RIPPLE BACKGROUND */}
+                                {(appState === 'idle' || appState === 'recording') && (
+                                    <>
+                                        {/* Outer Static Frame Lines */}
+                                        <div className="absolute top-0 left-0 w-4 h-4 border-t border-l border-[#333]" />
+                                        <div className="absolute top-0 right-0 w-4 h-4 border-t border-r border-[#333]" />
+                                        <div className="absolute bottom-0 left-0 w-4 h-4 border-b border-l border-[#333]" />
+                                        <div className="absolute bottom-0 right-0 w-4 h-4 border-b border-r border-[#333]" />
+                                        
+                                        {/* Inner Animated Frame (Active when recording or hovering) */}
+                                        <div className={`absolute inset-4 border border-[#1a1a1a] rounded-lg transition-all duration-500 ${appState === 'recording' ? 'scale-95 border-amber-900/40 animate-pulse' : ''}`} />
+                                        
+                                        {/* Center Element */}
+                                        <div className={`absolute inset-0 flex items-center justify-center pointer-events-none`}>
+                                            {/* Ripples */}
+                                            <div className={`w-[80%] h-[60%] border border-[#111] rounded-[100%] absolute transition-all duration-700 ${appState === 'recording' ? 'scale-110 border-amber-800/20 opacity-100' : 'opacity-20'}`} />
+                                            <div className={`w-[60%] h-[40%] border border-[#111] rounded-[100%] absolute transition-all duration-700 delay-75 ${appState === 'recording' ? 'scale-125 border-amber-800/20 opacity-100' : 'opacity-20'}`} />
+                                            <div className={`w-[40%] h-[20%] border border-[#111] rounded-[100%] absolute transition-all duration-700 delay-150 ${appState === 'recording' ? 'scale-150 border-amber-800/20 opacity-100' : 'opacity-20'}`} />
+                                        </div>
+                                    </>
+                                )}
+
+                                {/* CONTENT OVERLAY */}
+                                <div className="relative z-10 flex flex-col items-center justify-center gap-2">
+                                    {renderMainButtonContent(appState, tab, inputType, isPlaying)}
+                                    
+                                    {/* Text Prompts */}
+                                    <span className="text-[10px] font-bold tracking-[0.2em] text-[#444] mt-2">
+                                        {getStatusLabel(appState, inputType, isPlaying)}
+                                    </span>
+                                </div>
+
                             </button>
-                            
-                            {/* Label under button */}
-                            <div className="absolute -bottom-8 left-0 right-0 text-center text-[9px] font-bold tracking-[0.2em] text-[#333]">
-                                {appState === 'idle' && inputType === 'mic' ? 'HOLD' : 'PRESS'}
-                            </div>
                         </div>
 
-                        {/* Secondary Actions (Reset / Download) */}
-                        <div className="h-8 flex items-center gap-4">
+                        {/* Secondary Actions (Reset / Download) - Positioned below the main frame */}
+                        <div className="h-8 flex items-center justify-center gap-4 mt-4">
                             {(appState === 'completed' || appState === 'recorded') && (
                                 <>
-                                    <button onClick={reset} className="text-[#444] hover:text-[#888] transition-colors" title="Reset">
+                                    <button onClick={reset} className="text-[#444] hover:text-[#888] transition-colors p-2" title="Reset">
                                         <RefreshCw size={16} />
                                     </button>
                                     
                                     {appState === 'completed' && processedAudio && (
                                         <button 
                                             onClick={() => AudioService.downloadBuffer(processedAudio, tab === 'encode' ? 'birdsong_artifact.wav' : 'recovered_speech.wav')} 
-                                            className="text-amber-600 hover:text-amber-400 transition-colors flex items-center gap-2 text-xs font-bold tracking-wider"
+                                            className="text-amber-600 hover:text-amber-400 transition-colors flex items-center gap-2 text-xs font-bold tracking-wider px-4 py-2 bg-[#0a0a0a] border border-[#222] rounded-full"
                                         >
-                                            <Download size={16} />
-                                            SAVE
+                                            <Download size={14} />
+                                            SAVE ARTIFACT
                                         </button>
                                     )}
                                 </>
@@ -652,34 +686,43 @@ const ActivityIcon = () => (
     </svg>
 );
 
+// Helper to determine what text to show
+function getStatusLabel(state: AppState, input: InputType, isPlaying: boolean) {
+    if (state === 'processing') return 'PROCESSING DATA...';
+    if (state === 'completed') {
+        if (isPlaying) return 'PLAYING...';
+        return 'READY TO PLAY';
+    }
+    if (state === 'recording') return 'RECORDING... RELEASE TO END';
+    
+    // Idle
+    if (input === 'mic') return 'HOLD TO CAPTURE';
+    return 'CLICK TO UPLOAD ARTIFACT';
+}
+
 // Helper to determine what icon/text to show on the big button
 function renderMainButtonContent(state: AppState, tab: Tab, input: InputType, isPlaying: boolean) {
-    if (state === 'processing') return <div className="animate-spin text-amber-500"><RefreshCw size={24} /></div>;
+    if (state === 'processing') return <div className="animate-spin text-amber-500"><RefreshCw size={32} /></div>;
     
     if (state === 'completed') {
-        if (isPlaying) return <Pause className="text-amber-500" size={32} fill="currentColor" />;
-        return <Play className="text-amber-500" size={32} fill="currentColor" />;
-    }
-
-    if (state === 'recorded') {
-        // Ready to process
-        return tab === 'encode' ? <Zap className="text-white" size={28} fill="currentColor" /> : <Unlock className="text-white" size={28} />;
+        if (isPlaying) return <Pause className="text-amber-500" size={40} fill="currentColor" />;
+        return <Play className="text-amber-500" size={40} fill="currentColor" />;
     }
 
     // Idle State
     if (state === 'idle') {
         if (input === 'mic') {
              // Recording Mode
-             return <Power className="text-[#333]" size={32} />;
+             return <Fingerprint className="text-[#333]" size={48} />;
         } else {
              // File Upload Mode
-             return <Upload className="text-[#333]" size={28} />;
+             return <Maximize2 className="text-[#333]" size={40} />;
         }
     }
     
     // Recording State
     if (state === 'recording') {
-        return <div className="w-8 h-8 bg-black rounded shadow-sm" />;
+        return <div className="w-16 h-1 bg-amber-600/50 animate-pulse rounded-full" />;
     }
 
     return null;
