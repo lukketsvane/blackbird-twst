@@ -181,12 +181,28 @@ const extractPitch = (buffer: Float32Array, sampleRate: number): number => {
 
 export const encodeToBirdsong = async (inputBuffer: AudioBuffer, preset: EncodePreset = ENCODE_PRESETS[0]): Promise<AudioBuffer> => {
   const ctx = getAudioContext();
-  const inputData = inputBuffer.getChannelData(0);
-  const totalLength = inputData.length;
-  const outputData = new Float32Array(totalLength);
+  const numChannels = inputBuffer.numberOfChannels;
+  const totalLength = inputBuffer.length;
   
-  // 1. Prepare Pitch Analysis
-  // We analyze in chunks to drive the carrier frequency
+  // 1. Prepare Pitch Analysis (Mono Mix)
+  let pitchInputData: Float32Array;
+  
+  if (numChannels === 1) {
+      pitchInputData = inputBuffer.getChannelData(0);
+  } else {
+      // Downmix for pitch detection
+      pitchInputData = new Float32Array(totalLength);
+      const channelsData = [];
+      for(let c=0; c<numChannels; c++) channelsData.push(inputBuffer.getChannelData(c));
+      
+      for(let i=0; i<totalLength; i++) {
+          let sum = 0;
+          for(let c=0; c<numChannels; c++) sum += channelsData[c][i];
+          pitchInputData[i] = sum / numChannels;
+      }
+  }
+  
+  // Analyze in chunks to drive the carrier frequency
   const pitchAnalysisStep = 512;
   const numFrames = Math.ceil(totalLength / pitchAnalysisStep);
   const pitchCurve = new Float32Array(totalLength);
@@ -198,7 +214,7 @@ export const encodeToBirdsong = async (inputBuffer: AudioBuffer, preset: EncodeP
     const end = Math.min(start + FFT_SIZE, totalLength);
     if (end - start < FFT_SIZE/2) break;
     
-    const slice = inputData.slice(start, end);
+    const slice = pitchInputData.slice(start, end);
     let pitch = extractPitch(slice, SAMPLE_RATE);
     
     // Smooth pitch or hold last pitch to prevent carrier dropouts during unvoiced speech
@@ -210,8 +226,7 @@ export const encodeToBirdsong = async (inputBuffer: AudioBuffer, preset: EncodeP
       lastPitch = pitch;
     }
     
-    // Fill the sample-accurate pitch curve with linear interpolation
-    // We fill for the *next* block (prediction/hold)
+    // Fill the sample-accurate pitch curve
     for (let j = 0; j < pitchAnalysisStep; j++) {
         const idx = start + j;
         if (idx < totalLength) {
@@ -220,92 +235,94 @@ export const encodeToBirdsong = async (inputBuffer: AudioBuffer, preset: EncodeP
     }
   }
 
-  // 2. Main Encoding Loop (AM Modulation)
-  const lpf = new LowPassFilter(preset.inputLpfCutoff, SAMPLE_RATE);
-  let carrierPhase = 0;
+  // 2. Main Encoding Loop (AM Modulation) - Per Channel
+  const outputBuffer = ctx.createBuffer(numChannels, totalLength, SAMPLE_RATE);
 
-  for (let i = 0; i < totalLength; i++) {
-    // A. Filter Speech (Band limit to avoid aliasing when shifted up)
-    let speechSample = lpf.process(inputData[i]);
-    
-    // Normalize speech to mostly positive range (0.0 to 1.0) to drive envelope
-    // Standard AM: (1 + m*signal) * carrier
-    // We boost gain slightly to ensure good dynamic range in the bird song
-    const modulationIndex = 0.8; 
-    const envelope = 1.0 + (speechSample * 3.0 * modulationIndex); // 3.0 is input gain
+  for(let c = 0; c < numChannels; c++) {
+      const inputData = inputBuffer.getChannelData(c);
+      const outputData = outputBuffer.getChannelData(c);
+      
+      const lpf = new LowPassFilter(preset.inputLpfCutoff, SAMPLE_RATE);
+      let carrierPhase = 0;
 
-    // B. Calculate Carrier Frequency based on Pitch
-    // Map Human Pitch (80-300Hz) to Bird Range (4000Hz+)
-    const currentPitch = pitchCurve[i];
-    const carrierFreq = preset.carrierBaseFreq + (currentPitch * preset.pitchMultiplier);
-    
-    // C. Generate Carrier
-    carrierPhase += 2 * Math.PI * carrierFreq / SAMPLE_RATE;
-    // Add slight Frequency Modulation (Vibrato) to make it sound more organic
-    const vibrato = Math.sin(i * 0.001) * 50; // Slow waver
-    
-    // D. Modulate
-    // Envelope (Speech) * Carrier (Bird Tone)
-    let sample = envelope * Math.sin(carrierPhase + vibrato);
+      for (let i = 0; i < totalLength; i++) {
+        // A. Filter Speech (Band limit to avoid aliasing when shifted up)
+        let speechSample = lpf.process(inputData[i]);
+        
+        // Normalize speech to mostly positive range (0.0 to 1.0) to drive envelope
+        const modulationIndex = 0.8; 
+        const envelope = 1.0 + (speechSample * 3.0 * modulationIndex); // 3.0 is input gain
 
-    // Soft clip to prevent harsh digital overs if gain is too high
-    sample = Math.tanh(sample * 0.5);
+        // B. Calculate Carrier Frequency based on Pitch
+        const currentPitch = pitchCurve[i];
+        const carrierFreq = preset.carrierBaseFreq + (currentPitch * preset.pitchMultiplier);
+        
+        // C. Generate Carrier
+        carrierPhase += 2 * Math.PI * carrierFreq / SAMPLE_RATE;
+        // Add slight Frequency Modulation (Vibrato) to make it sound more organic
+        const vibrato = Math.sin(i * 0.001) * 50; // Slow waver
+        
+        // D. Modulate
+        // Envelope (Speech) * Carrier (Bird Tone)
+        let sample = envelope * Math.sin(carrierPhase + vibrato);
 
-    outputData[i] = sample;
-    
-    if (i % 10000 === 0) await new Promise(r => setTimeout(r, 0));
+        // Soft clip to prevent harsh digital overs if gain is too high
+        sample = Math.tanh(sample * 0.5);
+
+        outputData[i] = sample;
+      }
+      
+      // Yield
+      await new Promise(r => setTimeout(r, 0));
   }
 
-  const out = ctx.createBuffer(1, totalLength, SAMPLE_RATE);
-  out.getChannelData(0).set(outputData);
-  return out;
+  return outputBuffer;
 };
 
 export const decodeFromBirdsong = async (inputBuffer: AudioBuffer, preset: DecodePreset = DECODE_PRESETS[0]): Promise<AudioBuffer> => {
   const ctx = getAudioContext();
-  const inputData = inputBuffer.getChannelData(0);
-  const totalLength = inputData.length;
-  const outputData = new Float32Array(totalLength);
+  const numChannels = inputBuffer.numberOfChannels;
+  const totalLength = inputBuffer.length;
+  const outputBuffer = ctx.createBuffer(numChannels, totalLength, SAMPLE_RATE);
 
-  // We use a robust Envelope Detector (AM Demodulation)
-  // Logic: |Signal| -> LowPass -> DC Block
-  
-  // Create Filter Chain based on preset
-  const filters: LowPassFilter[] = [];
-  for(let i = 0; i < preset.filterStages; i++) {
-      filters.push(new LowPassFilter(preset.lpfCutoff, SAMPLE_RATE));
+  for(let c = 0; c < numChannels; c++) {
+      const inputData = inputBuffer.getChannelData(c);
+      const outputData = outputBuffer.getChannelData(c);
+
+      // We use a robust Envelope Detector (AM Demodulation)
+      // Logic: |Signal| -> LowPass -> DC Block
+      
+      // Create Filter Chain based on preset
+      const filters: LowPassFilter[] = [];
+      for(let i = 0; i < preset.filterStages; i++) {
+          filters.push(new LowPassFilter(preset.lpfCutoff, SAMPLE_RATE));
+      }
+      
+      const dcBlocker = new DCBlocker();
+
+      for (let i = 0; i < totalLength; i++) {
+        const sample = inputData[i];
+
+        // 1. Rectification (Absolute value recovers the envelope)
+        const rectified = Math.abs(sample);
+
+        // 2. Steep Low Pass Filter Chain
+        let recovered = rectified;
+        for(const f of filters) {
+            recovered = f.process(recovered);
+        }
+
+        // 3. Remove DC Offset
+        recovered = dcBlocker.process(recovered);
+
+        // 4. Makeup Gain
+        outputData[i] = recovered * preset.gainMultiplier;
+      }
+      
+      await new Promise(r => setTimeout(r, 0));
   }
-  
-  const dcBlocker = new DCBlocker();
 
-  for (let i = 0; i < totalLength; i++) {
-    const sample = inputData[i];
-
-    // 1. Rectification (Absolute value recovers the envelope)
-    // Because AM puts the signal in the magnitude of the carrier
-    const rectified = Math.abs(sample);
-
-    // 2. Steep Low Pass Filter Chain
-    // Removes the high frequency carrier ripple, leaving the speech envelope
-    let recovered = rectified;
-    for(const f of filters) {
-        recovered = f.process(recovered);
-    }
-
-    // 3. Remove DC Offset
-    // The AM process added a +1.0 bias. The rectification keeps it positive.
-    // We need to center it back to 0.0 for audio.
-    recovered = dcBlocker.process(recovered);
-
-    // 4. Makeup Gain
-    outputData[i] = recovered * preset.gainMultiplier;
-    
-    if (i % 10000 === 0) await new Promise(r => setTimeout(r, 0));
-  }
-
-  const out = ctx.createBuffer(1, totalLength, SAMPLE_RATE);
-  out.getChannelData(0).set(outputData);
-  return out;
+  return outputBuffer;
 };
 
 // --- Utilities ---
@@ -325,8 +342,8 @@ export const bufferToWavBlob = (buffer: AudioBuffer): Blob => {
   const format = 1; // PCM
   const bitDepth = 16;
   
-  const data = buffer.getChannelData(0);
-  const dataLength = data.length * 2;
+  const length = buffer.length;
+  const dataLength = length * numChannels * 2;
   const headerLength = 44;
   const totalLength = headerLength + dataLength;
   const arrayBuffer = new ArrayBuffer(totalLength);
@@ -350,11 +367,17 @@ export const bufferToWavBlob = (buffer: AudioBuffer): Blob => {
   writeString(36, 'data');
   view.setUint32(40, dataLength, true);
 
+  // Interleave channels
   let offset = 44;
-  for (let i = 0; i < data.length; i++) {
-    const s = Math.max(-1, Math.min(1, data[i]));
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-    offset += 2;
+  const channels = [];
+  for(let c=0; c<numChannels; c++) channels.push(buffer.getChannelData(c));
+  
+  for (let i = 0; i < length; i++) {
+    for (let c = 0; c < numChannels; c++) {
+        const s = Math.max(-1, Math.min(1, channels[c][i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        offset += 2;
+    }
   }
 
   return new Blob([arrayBuffer], { type: 'audio/wav' });
