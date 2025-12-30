@@ -37,7 +37,6 @@ export const saveHistoryItem = async (item: HistoryItem): Promise<void> => {
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
-    // Error silently handled
   }
 };
 
@@ -67,7 +66,6 @@ export const deleteHistoryItem = async (id: string): Promise<void> => {
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
-    // Error silently handled
   }
 };
 
@@ -82,6 +80,5 @@ export const clearAllHistory = async (): Promise<void> => {
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
-    // Error silently handled
   }
 };
