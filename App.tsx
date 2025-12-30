@@ -12,6 +12,72 @@ type Tab = 'encode' | 'decode';
 type InputType = 'mic' | 'file';
 type AppState = 'idle' | 'recording' | 'recorded' | 'processing' | 'completed' | 'playing';
 
+// --- Helper Components & Functions ---
+
+const InputButton = ({ active, onClick, children }: { active: boolean, onClick: () => void, children: React.ReactNode }) => (
+    <button 
+        onClick={onClick}
+        className={`p-1.5 rounded-md transition-all duration-300 border ${
+            active 
+            ? 'bg-[#1a1a1a] border-amber-900/50 text-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.1)]' 
+            : 'bg-transparent border-transparent text-[#333] hover:text-[#555]'
+        }`}
+    >
+        {children}
+    </button>
+);
+
+const ActivityIcon = () => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className="w-8 h-8 opacity-20"
+  >
+    <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+  </svg>
+);
+
+const renderMainButtonContent = (appState: AppState, tab: Tab, inputType: InputType, isPlaying: boolean) => {
+    if (appState === 'processing') {
+        return <RefreshCw className="animate-spin text-amber-500" size={32} />;
+    }
+    
+    if (appState === 'recording') {
+        return <div className="w-8 h-8 bg-amber-500 rounded-sm animate-pulse shadow-[0_0_15px_rgba(245,158,11,0.8)]" />;
+    }
+
+    if (appState === 'completed' || appState === 'recorded') {
+        if (isPlaying) return <Pause className="text-amber-500" size={32} />;
+        return <Play className="text-amber-500 ml-1" size={32} />;
+    }
+
+    // Idle
+    if (tab === 'decode' || inputType === 'file') {
+        return <Upload className="text-[#333] group-hover:text-[#555] transition-colors" size={32} />;
+    }
+
+    return <Mic className="text-[#333] group-hover:text-[#555] transition-colors" size={32} />;
+};
+
+const getStatusLabel = (appState: AppState, inputType: InputType, isPlaying: boolean) => {
+    switch (appState) {
+        case 'recording': return 'RECORDING...';
+        case 'processing': return 'PROCESSING...';
+        case 'playing': return 'PLAYING';
+        case 'completed': return isPlaying ? 'PLAYING' : 'PLAY RESULT';
+        case 'recorded': return isPlaying ? 'PLAYING' : 'PLAY';
+        case 'idle': return inputType === 'mic' ? 'TAP TO RECORD' : 'TAP TO UPLOAD';
+        default: return 'READY';
+    }
+};
+
 export default function App() {
   // --- State ---
   const [tab, setTab] = useState<Tab>('encode');
@@ -154,16 +220,79 @@ export default function App() {
       if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const runProcessing = async (buffer: AudioBuffer, modeOverride?: Tab) => {
+      const currentMode = modeOverride || tab;
+      
+      setAppState('processing');
+      setStatusText(currentMode === 'encode' ? 'ENCRYPTING...' : 'DECODING...');
+      
+      // Short delay to allow UI render
+      await new Promise(r => setTimeout(r, 100));
+
+      try {
+          let result: AudioBuffer;
+          if (currentMode === 'encode') {
+              const preset = AudioService.ENCODE_PRESETS[encodePresetIndex];
+              result = await AudioService.encodeToBirdsong(buffer, preset);
+          } else {
+              const preset = AudioService.DECODE_PRESETS[decodePresetIndex];
+              result = await AudioService.decodeFromBirdsong(buffer, preset);
+          }
+          setProcessedAudio(result);
+          setAppState('completed');
+          setStatusText(currentMode === 'encode' ? 'ENCRYPTION COMPLETE' : 'DECRYPTION COMPLETE');
+          
+          // Save to History
+          const timestamp = Date.now();
+          const blob = AudioService.bufferToWavBlob(result);
+          const duration = result.duration;
+          const id = timestamp.toString() + Math.random().toString(36).substring(7); // simple id
+          const filename = currentMode === 'encode' ? `enc_${timestamp}.wav` : `dec_${timestamp}.wav`;
+          
+          const newItem: StorageService.HistoryItem = {
+              id, type: currentMode, timestamp, blob, duration, filename
+          };
+          
+          StorageService.saveHistoryItem(newItem).then(() => {
+              setHistoryItems(prev => [newItem, ...prev]);
+          });
+
+      } catch (e) {
+          console.error(e);
+          setAppState('recorded');
+          setStatusText('PROCESS FAILED');
+      }
+  };
+
   const handleModeChange = (newTab: Tab) => {
-      reset();
-      setTab(newTab);
-      // Default inputs
-      if (newTab === 'decode') {
-          setInputType('file'); // Decode always starts with file for now (or mic if we supported listening to birds)
-          setStatusText('LOAD ARTIFACT');
+      // Special workflow: If we just encoded something and switch to decode, 
+      // automatically load that result as the source for decoding.
+      if (tab === 'encode' && newTab === 'decode' && appState === 'completed' && processedAudio) {
+          const artifactBuffer = processedAudio;
+          
+          // Clean up current playback
+          stopAudio();
+          
+          // Set State for Decode
+          setTab('decode');
+          setSourceAudio(artifactBuffer); // The encrypted output becomes the input
+          setProcessedAudio(null);
+          setInputType('file'); // It's effectively a file source
+          
+          // Initiate decoding immediately with the artifact
+          runProcessing(artifactBuffer, 'decode');
       } else {
-          setInputType('mic');
-          setStatusText('READY');
+          // Standard Switching
+          reset();
+          setTab(newTab);
+          // Default inputs
+          if (newTab === 'decode') {
+              setInputType('file');
+              setStatusText('LOAD ARTIFACT');
+          } else {
+              setInputType('mic');
+              setStatusText('READY');
+          }
       }
   };
 
@@ -189,47 +318,6 @@ export default function App() {
   const getCurrentPresetDesc = () => {
       if (tab === 'encode') return AudioService.ENCODE_PRESETS[encodePresetIndex].description;
       return AudioService.DECODE_PRESETS[decodePresetIndex].description;
-  };
-
-  const runProcessing = async (buffer: AudioBuffer) => {
-      setAppState('processing');
-      setStatusText(tab === 'encode' ? 'ENCRYPTING...' : 'DECODING...');
-      
-      // Short delay to allow UI render
-      await new Promise(r => setTimeout(r, 100));
-
-      try {
-          let result: AudioBuffer;
-          if (tab === 'encode') {
-              const preset = AudioService.ENCODE_PRESETS[encodePresetIndex];
-              result = await AudioService.encodeToBirdsong(buffer, preset);
-          } else {
-              const preset = AudioService.DECODE_PRESETS[decodePresetIndex];
-              result = await AudioService.decodeFromBirdsong(buffer, preset);
-          }
-          setProcessedAudio(result);
-          setAppState('completed');
-          setStatusText(tab === 'encode' ? 'ENCRYPTION COMPLETE' : 'DECRYPTION COMPLETE');
-          
-          // Save to History
-          const timestamp = Date.now();
-          const blob = AudioService.bufferToWavBlob(result);
-          const duration = result.duration;
-          const id = timestamp.toString() + Math.random().toString(36).substring(7); // simple id
-          const filename = tab === 'encode' ? `enc_${timestamp}.wav` : `dec_${timestamp}.wav`;
-          
-          const newItem: StorageService.HistoryItem = {
-              id, type: tab, timestamp, blob, duration, filename
-          };
-          
-          StorageService.saveHistoryItem(newItem).then(() => {
-              setHistoryItems(prev => [newItem, ...prev]);
-          });
-
-      } catch (e) {
-          setAppState('recorded');
-          setStatusText('PROCESS FAILED');
-      }
   };
 
   const startRecording = async () => {
@@ -429,7 +517,7 @@ export default function App() {
             <div className="bg-[#0b0b0b] rounded-2xl border border-[#1a1a1a] p-3 shadow-inner">
                 
                 {/* Top Control Row */}
-                <div className="flex justify-between items-center mb-3">
+                <div className="flex justify-between items-center mb-3 h-8">
                     {/* Mode Switcher */}
                     <div className="flex bg-[#0a0a0a] rounded-lg p-0.5 border border-[#222] shadow-sm">
                         <button 
@@ -468,8 +556,8 @@ export default function App() {
                     </div>
                 </div>
 
-                {/* Preset Selector */}
-                {appState === 'idle' && (
+                {/* Preset Selector (Always rendered to preserve height, hidden if not idle) */}
+                <div className={`transition-opacity duration-200 ${appState === 'idle' ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
                     <div className="flex items-center justify-between bg-[#0a0a0a] border border-[#222] rounded-lg px-2 py-1.5 mb-3">
                         <div className="flex items-center gap-1.5 text-[#444]">
                             <Settings2 size={10} />
@@ -488,7 +576,7 @@ export default function App() {
                             </button>
                         </div>
                     </div>
-                )}
+                </div>
 
                 {/* Hidden File Input */}
                 <input 
@@ -556,9 +644,10 @@ export default function App() {
                     <div className="absolute bottom-0 right-0 w-3 h-3 border-b border-r border-[#333] pointer-events-none" />
                 </div>
 
-                {/* Secondary Actions (Reset / Download) */}
-                {(appState === 'completed' || appState === 'recorded') && (
-                    <div className="h-8 flex items-center justify-center gap-4 mt-3">
+                {/* Secondary Actions (Reset / Download) - Always occupy height */}
+                <div className="h-8 mt-3 flex items-center justify-center gap-4">
+                    {(appState === 'completed' || appState === 'recorded') && (
+                        <>
                             <button onClick={reset} className="text-[#444] hover:text-[#888] transition-colors p-2" title="Reset">
                                 <RefreshCw size={14} />
                             </button>
@@ -572,8 +661,9 @@ export default function App() {
                                     SAVE
                                 </button>
                             )}
-                    </div>
-                )}
+                        </>
+                    )}
+                </div>
             </div>
         </div>
             
@@ -640,63 +730,4 @@ export default function App() {
         )}
     </div>
   );
-}
-
-// --- Sub Components ---
-
-const InputButton = ({ active, children, onClick }: { active: boolean, children?: React.ReactNode, onClick: () => void }) => (
-    <button 
-        onClick={onClick}
-        className={`w-7 h-7 rounded-full flex items-center justify-center transition-all border ${active ? 'bg-amber-900/20 border-amber-700/50 text-amber-500' : 'bg-[#0a0a0a] border-[#222] text-[#444] hover:border-[#333]'}`}
-    >
-        {children}
-    </button>
-);
-
-const ActivityIcon = () => (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-    </svg>
-);
-
-// Helper to determine what text to show
-function getStatusLabel(state: AppState, input: InputType, isPlaying: boolean) {
-    if (state === 'processing') return 'PROCESSING...';
-    if (state === 'completed') {
-        if (isPlaying) return 'PLAYING...';
-        return 'READY';
-    }
-    if (state === 'recording') return 'RELEASE TO END';
-    
-    // Idle
-    if (input === 'mic') return 'HOLD';
-    return 'UPLOAD';
-}
-
-// Helper to determine what icon/text to show on the big button
-function renderMainButtonContent(state: AppState, tab: Tab, input: InputType, isPlaying: boolean) {
-    if (state === 'processing') return <div className="animate-spin text-amber-500"><RefreshCw size={24} /></div>;
-    
-    if (state === 'completed') {
-        if (isPlaying) return <Pause className="text-amber-500" size={32} fill="currentColor" />;
-        return <Play className="text-amber-500" size={32} fill="currentColor" />;
-    }
-
-    // Idle State
-    if (state === 'idle') {
-        if (input === 'mic') {
-             // Recording Mode
-             return <Fingerprint className="text-[#333]" size={40} />;
-        } else {
-             // File Upload Mode
-             return <Maximize2 className="text-[#333]" size={32} />;
-        }
-    }
-    
-    // Recording State
-    if (state === 'recording') {
-        return <div className="w-12 h-1 bg-amber-600/50 animate-pulse rounded-full" />;
-    }
-
-    return null;
 }
