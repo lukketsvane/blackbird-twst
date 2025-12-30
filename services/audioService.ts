@@ -4,15 +4,6 @@ export const SAMPLE_RATE = 44100;
 export const FFT_SIZE = 2048;
 export const HOP_SIZE = 256; 
 
-// Codec Constants
-// Speech is band-limited to 2.5kHz to ensure it fits below the carrier
-const SPEECH_LPF_CUTOFF = 2500; 
-// The carrier glides based on input pitch. 
-// Base 4kHz + (InputPitch * 16). 
-// Increased to 4000Hz to allow better separation from the speech envelope during decoding.
-const CARRIER_BASE_FREQ = 4000;
-const CARRIER_PITCH_MULTIPLIER = 16.0;
-
 let audioContext: AudioContext | null = null;
 
 export const getAudioContext = (): AudioContext => {
@@ -21,6 +12,80 @@ export const getAudioContext = (): AudioContext => {
   }
   return audioContext;
 };
+
+// --- Preset Definitions ---
+
+export interface EncodePreset {
+    id: string;
+    name: string;
+    carrierBaseFreq: number;
+    pitchMultiplier: number;
+    inputLpfCutoff: number;
+    description: string;
+}
+
+export interface DecodePreset {
+    id: string;
+    name: string;
+    lpfCutoff: number;
+    filterStages: number;
+    gainMultiplier: number;
+    description: string;
+}
+
+export const ENCODE_PRESETS: EncodePreset[] = [
+    {
+        id: 'turdus',
+        name: 'TURDUS (STD)',
+        carrierBaseFreq: 4000,
+        pitchMultiplier: 16.0,
+        inputLpfCutoff: 2500,
+        description: 'Standard Blackbird modulation.'
+    },
+    {
+        id: 'erithacus',
+        name: 'ERITHACUS (HI)',
+        carrierBaseFreq: 5500,
+        pitchMultiplier: 20.0,
+        inputLpfCutoff: 3000,
+        description: 'High-pitch Robin variant. Clearer speech.'
+    },
+    {
+        id: 'strix',
+        name: 'STRIX (LO)',
+        carrierBaseFreq: 2000,
+        pitchMultiplier: 8.0,
+        inputLpfCutoff: 1200,
+        description: 'Low-freq Owl rumble. High concealment.'
+    }
+];
+
+export const DECODE_PRESETS: DecodePreset[] = [
+    {
+        id: 'std',
+        name: 'STANDARD',
+        lpfCutoff: 2500,
+        filterStages: 3,
+        gainMultiplier: 8.0,
+        description: 'Balanced recovery.'
+    },
+    {
+        id: 'wide',
+        name: 'CLARITY (WIDE)',
+        lpfCutoff: 3500,
+        filterStages: 2,
+        gainMultiplier: 6.0,
+        description: 'More treble, some carrier bleed.'
+    },
+    {
+        id: 'narrow',
+        name: 'ISOLATION (NR)',
+        lpfCutoff: 1500,
+        filterStages: 4,
+        gainMultiplier: 12.0,
+        description: 'Aggressive filtering for noisy artifacts.'
+    }
+];
 
 // --- DSP Utilities ---
 
@@ -114,7 +179,7 @@ const extractPitch = (buffer: Float32Array, sampleRate: number): number => {
 
 // --- Codec Implementation ---
 
-export const encodeToBirdsong = async (inputBuffer: AudioBuffer): Promise<AudioBuffer> => {
+export const encodeToBirdsong = async (inputBuffer: AudioBuffer, preset: EncodePreset = ENCODE_PRESETS[0]): Promise<AudioBuffer> => {
   const ctx = getAudioContext();
   const inputData = inputBuffer.getChannelData(0);
   const totalLength = inputData.length;
@@ -156,7 +221,7 @@ export const encodeToBirdsong = async (inputBuffer: AudioBuffer): Promise<AudioB
   }
 
   // 2. Main Encoding Loop (AM Modulation)
-  const lpf = new LowPassFilter(SPEECH_LPF_CUTOFF, SAMPLE_RATE);
+  const lpf = new LowPassFilter(preset.inputLpfCutoff, SAMPLE_RATE);
   let carrierPhase = 0;
 
   for (let i = 0; i < totalLength; i++) {
@@ -172,7 +237,7 @@ export const encodeToBirdsong = async (inputBuffer: AudioBuffer): Promise<AudioB
     // B. Calculate Carrier Frequency based on Pitch
     // Map Human Pitch (80-300Hz) to Bird Range (4000Hz+)
     const currentPitch = pitchCurve[i];
-    const carrierFreq = CARRIER_BASE_FREQ + (currentPitch * CARRIER_PITCH_MULTIPLIER);
+    const carrierFreq = preset.carrierBaseFreq + (currentPitch * preset.pitchMultiplier);
     
     // C. Generate Carrier
     carrierPhase += 2 * Math.PI * carrierFreq / SAMPLE_RATE;
@@ -196,7 +261,7 @@ export const encodeToBirdsong = async (inputBuffer: AudioBuffer): Promise<AudioB
   return out;
 };
 
-export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<AudioBuffer> => {
+export const decodeFromBirdsong = async (inputBuffer: AudioBuffer, preset: DecodePreset = DECODE_PRESETS[0]): Promise<AudioBuffer> => {
   const ctx = getAudioContext();
   const inputData = inputBuffer.getChannelData(0);
   const totalLength = inputData.length;
@@ -205,12 +270,11 @@ export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<Audi
   // We use a robust Envelope Detector (AM Demodulation)
   // Logic: |Signal| -> LowPass -> DC Block
   
-  // Improvement: Cascaded Low Pass Filters
-  // To strictly remove the 4000Hz+ carrier while keeping the 2500Hz speech envelope,
-  // we chain multiple 2nd-order filters to create a steep 6th-order roll-off.
-  const lpf1 = new LowPassFilter(2500, SAMPLE_RATE);
-  const lpf2 = new LowPassFilter(2500, SAMPLE_RATE);
-  const lpf3 = new LowPassFilter(2500, SAMPLE_RATE);
+  // Create Filter Chain based on preset
+  const filters: LowPassFilter[] = [];
+  for(let i = 0; i < preset.filterStages; i++) {
+      filters.push(new LowPassFilter(preset.lpfCutoff, SAMPLE_RATE));
+  }
   
   const dcBlocker = new DCBlocker();
 
@@ -223,9 +287,10 @@ export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<Audi
 
     // 2. Steep Low Pass Filter Chain
     // Removes the high frequency carrier ripple, leaving the speech envelope
-    let recovered = lpf1.process(rectified);
-    recovered = lpf2.process(recovered);
-    recovered = lpf3.process(recovered);
+    let recovered = rectified;
+    for(const f of filters) {
+        recovered = f.process(recovered);
+    }
 
     // 3. Remove DC Offset
     // The AM process added a +1.0 bias. The rectification keeps it positive.
@@ -233,8 +298,7 @@ export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<Audi
     recovered = dcBlocker.process(recovered);
 
     // 4. Makeup Gain
-    // Multiple LPF passes attenuate the signal slightly, so we boost gain.
-    outputData[i] = recovered * 8.0;
+    outputData[i] = recovered * preset.gainMultiplier;
     
     if (i % 10000 === 0) await new Promise(r => setTimeout(r, 0));
   }

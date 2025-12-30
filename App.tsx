@@ -4,7 +4,7 @@ import * as StorageService from './services/storageService';
 import { 
   Mic, Upload, Zap, Lock, Unlock, Play, Pause, 
   Power, Download, Fingerprint, RefreshCw, X,
-  History, Trash2, Calendar
+  History, Trash2, Calendar, ChevronLeft, ChevronRight, Settings2
 } from 'lucide-react';
 
 type Tab = 'encode' | 'decode';
@@ -18,6 +18,10 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>('idle');
   const [statusText, setStatusText] = useState('READY');
   
+  // Presets
+  const [encodePresetIndex, setEncodePresetIndex] = useState(0);
+  const [decodePresetIndex, setDecodePresetIndex] = useState(0);
+
   // Audio Buffers
   const [sourceAudio, setSourceAudio] = useState<AudioBuffer | null>(null);
   const [processedAudio, setProcessedAudio] = useState<AudioBuffer | null>(null); // The result (birdsong or speech)
@@ -162,6 +166,30 @@ export default function App() {
       }
   };
 
+  const cyclePreset = (direction: 1 | -1) => {
+      if (tab === 'encode') {
+          setEncodePresetIndex(prev => {
+              const len = AudioService.ENCODE_PRESETS.length;
+              return (prev + direction + len) % len;
+          });
+      } else {
+          setDecodePresetIndex(prev => {
+              const len = AudioService.DECODE_PRESETS.length;
+              return (prev + direction + len) % len;
+          });
+      }
+  };
+
+  const getCurrentPresetName = () => {
+      if (tab === 'encode') return AudioService.ENCODE_PRESETS[encodePresetIndex].name;
+      return AudioService.DECODE_PRESETS[decodePresetIndex].name;
+  };
+  
+  const getCurrentPresetDesc = () => {
+      if (tab === 'encode') return AudioService.ENCODE_PRESETS[encodePresetIndex].description;
+      return AudioService.DECODE_PRESETS[decodePresetIndex].description;
+  };
+
   const startRecording = async () => {
       if (inputType !== 'mic' || appState !== 'idle') return;
       try {
@@ -238,9 +266,11 @@ export default function App() {
       try {
           let result: AudioBuffer;
           if (tab === 'encode') {
-              result = await AudioService.encodeToBirdsong(sourceAudio);
+              const preset = AudioService.ENCODE_PRESETS[encodePresetIndex];
+              result = await AudioService.encodeToBirdsong(sourceAudio, preset);
           } else {
-              result = await AudioService.decodeFromBirdsong(sourceAudio);
+              const preset = AudioService.DECODE_PRESETS[decodePresetIndex];
+              result = await AudioService.decodeFromBirdsong(sourceAudio, preset);
           }
           setProcessedAudio(result);
           setAppState('completed');
@@ -398,7 +428,7 @@ export default function App() {
                 <div className="bg-[#050505] rounded-[1.8rem] border border-[#222] p-5 pb-8 relative overflow-hidden">
                     
                     {/* Top Control Row */}
-                    <div className="flex justify-between items-center mb-8 pb-6 border-b border-[#1a1a1a]">
+                    <div className="flex justify-between items-center mb-6 border-b border-[#1a1a1a] pb-4">
                         
                         {/* Mode Switcher */}
                         <div className="flex bg-[#0a0a0a] rounded-lg p-1 border border-[#222] shadow-sm">
@@ -437,6 +467,28 @@ export default function App() {
                              )}
                         </div>
                     </div>
+
+                    {/* Preset Selector */}
+                    {appState === 'idle' && (
+                        <div className="flex items-center justify-between bg-[#0a0a0a] border border-[#222] rounded-lg px-3 py-2 mb-6">
+                            <div className="flex items-center gap-2 text-[#444]">
+                                <Settings2 size={12} />
+                                <span className="text-[9px] font-bold tracking-widest">PRESET</span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <button onClick={() => cyclePreset(-1)} className="text-[#444] hover:text-amber-500">
+                                    <ChevronLeft size={16} />
+                                </button>
+                                <div className="flex flex-col items-center w-28">
+                                    <span className="text-[10px] font-bold text-amber-500 tracking-wide whitespace-nowrap">{getCurrentPresetName()}</span>
+                                    <span className="text-[7px] text-[#555] tracking-tight">{getCurrentPresetDesc().split(' ')[0]}...</span>
+                                </div>
+                                <button onClick={() => cyclePreset(1)} className="text-[#444] hover:text-amber-500">
+                                    <ChevronRight size={16} />
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* Hidden File Input */}
                     <input 
