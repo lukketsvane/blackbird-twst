@@ -1,148 +1,194 @@
-
 import React, { useState, useRef, useEffect } from 'react';
 import * as AudioService from './services/audioService';
 import { Diagram } from './components/Diagram';
-import { Download, Play, Mic, Square, Upload, RefreshCw, FileAudio, Info, Music } from 'lucide-react';
+import { Download, Play, Mic, Square, Upload, Lock, Unlock, Zap, Info, X, Pause } from 'lucide-react';
 
-type Mode = 'idle' | 'recording' | 'playing';
-
-// Color palette for spectrogram
-const THEME_COLORS = {
-  input: { r: 16, g: 185, b: 129 },   // Emerald-500
-  encoded: { r: 245, g: 158, b: 11 }, // Amber-500
-  decoded: { r: 139, g: 92, b: 246 }, // Violet-500
-  idle: { r: 75, g: 85, b: 99 }       // Gray-600
-};
+type Mode = 'idle' | 'recording' | 'playing' | 'encoding' | 'decoding';
 
 export default function BirdsongCodec() {
   const [mode, setMode] = useState<Mode>('idle');
+  const [status, setStatus] = useState('IDLE');
+  
+  // Data State
   const [recordedAudio, setRecordedAudio] = useState<AudioBuffer | null>(null);
   const [encodedAudio, setEncodedAudio] = useState<AudioBuffer | null>(null);
   const [decodedAudio, setDecodedAudio] = useState<AudioBuffer | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [status, setStatus] = useState('Ready to record speech');
-  const [showInfo, setShowInfo] = useState(false);
   
+  // UI State
+  const [showInfo, setShowInfo] = useState(false);
+  const [activePlayback, setActivePlayback] = useState<'input'|'encoded'|'decoded'|null>(null);
+
+  // Audio Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  
   const animationRef = useRef<number>(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Initialize analyser on mount
+  // --- Initialization ---
   useEffect(() => {
-    const ctx = AudioService.getAudioContext();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 2048; // Higher resolution for spectrogram
-    analyser.smoothingTimeConstant = 0.2;
-    analyserRef.current = analyser;
+    const handleResize = () => {
+        if (canvasRef.current) {
+            const parent = canvasRef.current.parentElement;
+            if (parent) {
+                // High DPI for Retina Displays
+                const dpr = window.devicePixelRatio || 2;
+                canvasRef.current.width = parent.clientWidth * dpr;
+                canvasRef.current.height = parent.clientHeight * dpr;
+            }
+        }
+    };
+    window.addEventListener('resize', handleResize);
+    setTimeout(handleResize, 100);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      cancelAnimationFrame(animationRef.current);
+    };
   }, []);
 
-  const stopAudio = () => {
-    if (sourceRef.current) {
-      try { sourceRef.current.stop(); } catch(e) {}
-      sourceRef.current = null;
+  const ensureAnalyser = () => {
+    const ctx = AudioService.getAudioContext();
+    if (!analyserRef.current) {
+      analyserRef.current = ctx.createAnalyser();
+      analyserRef.current.fftSize = 256; // Good balance for bar count
+      analyserRef.current.smoothingTimeConstant = 0.6; // Smoother fallback
     }
-    cancelAnimationFrame(animationRef.current);
+    return analyserRef.current;
   };
 
-  const drawSpectrogram = (color: {r: number, g: number, b: number}) => {
+  const stopAudio = () => {
+    cancelAnimationFrame(animationRef.current);
+    if (sourceRef.current) {
+      try { sourceRef.current.stop(); } catch(e) {}
+      try { sourceRef.current.disconnect(); } catch(e) {}
+      sourceRef.current = null;
+    }
+    if (mediaStreamSourceRef.current) {
+      try { mediaStreamSourceRef.current.disconnect(); } catch(e) {}
+      mediaStreamSourceRef.current = null;
+    }
+    setActivePlayback(null);
+  };
+
+  // --- Gold Bar Visualizer ---
+  const drawBars = (isActive: boolean) => {
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
     if (!canvas || !analyser) return;
 
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     const width = canvas.width;
     const height = canvas.height;
     
-    // Get frequency data
+    // Clear
+    ctx.clearRect(0, 0, width, height);
+
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     analyser.getByteFrequencyData(dataArray);
 
-    // Scroll effect: Draw current canvas shifted left
-    const scrollSpeed = 2;
-    ctx.drawImage(canvas, -scrollSpeed, 0);
+    // Aesthetics
+    const gap = 4 * (window.devicePixelRatio || 2); 
+    const barCount = 40; // Fixed number of bars for the "look"
+    const step = Math.floor(bufferLength / barCount);
+    const barWidth = (width / barCount) - gap;
 
-    // Clear the new strip on the right
-    const x = width - scrollSpeed;
-    ctx.fillStyle = '#050505';
-    ctx.fillRect(x, 0, scrollSpeed, height);
-
-    // Draw new frequency bins
-    // Draw logarithmic-ish scale for better visual
-    for (let y = 0; y < height; y++) {
-      const i = height - 1 - y;
-      // Linear mapping for simplicity in this visualization, 
-      // but emphasizing the speech range (lower bins)
-      const binIndex = Math.floor(i * (bufferLength / 1.5) / height); 
-      
-      if (binIndex < bufferLength) {
-        const value = dataArray[binIndex];
-        if (value > 20) { // Noise threshold
-          const alpha = (value / 255);
-          ctx.fillStyle = `rgba(${color.r}, ${color.g}, ${color.b}, ${alpha})`;
-          ctx.fillRect(x, y, scrollSpeed, 1);
+    for (let i = 0; i < barCount; i++) {
+        // Average the bin values for this bar to represent the range
+        let sum = 0;
+        for (let j=0; j<step; j++) {
+            sum += dataArray[i*step + j];
         }
-      }
+        const avg = sum / step;
+
+        const val = isActive 
+            ? (avg / 255) 
+            : Math.max(0.02, (Math.sin(Date.now()/1000 + i) * 0.05 + 0.05)); // Idle wave
+
+        const barHeight = val * height * 0.9;
+        const x = i * (barWidth + gap) + (gap/2);
+        const y = height - barHeight;
+
+        // Gradient Gold
+        const gradient = ctx.createLinearGradient(0, y, 0, height);
+        gradient.addColorStop(0, 'rgba(234, 179, 8, 0.9)'); // Yellow-500
+        gradient.addColorStop(1, 'rgba(234, 179, 8, 0.2)');
+
+        ctx.fillStyle = isActive ? gradient : 'rgba(255, 255, 255, 0.05)';
+        
+        // Rounded top bars
+        ctx.beginPath();
+        const r = barWidth / 2;
+        ctx.moveTo(x, y + r);
+        ctx.arc(x + r, y + r, r, Math.PI, 0);
+        ctx.lineTo(x + barWidth, height);
+        ctx.lineTo(x, height);
+        ctx.closePath();
+        ctx.fill();
     }
   };
+
+  // --- Logic ---
 
   const startRecording = async () => {
     stopAudio();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const ctx = AudioService.getAudioContext();
       if (ctx.state === 'suspended') await ctx.resume();
 
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorderRef.current = new MediaRecorder(stream);
       chunksRef.current = [];
       
+      const analyser = ensureAnalyser();
       const source = ctx.createMediaStreamSource(stream);
+      mediaStreamSourceRef.current = source;
+      source.connect(analyser);
       
-      if (!analyserRef.current) {
-         analyserRef.current = ctx.createAnalyser();
-         analyserRef.current.fftSize = 2048;
-      }
-      source.connect(analyserRef.current);
-      
-      mediaRecorderRef.current.ondataavailable = (e) => {
-        chunksRef.current.push(e.data);
-      };
-      
+      mediaRecorderRef.current.ondataavailable = (e) => chunksRef.current.push(e.data);
       mediaRecorderRef.current.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-        
-        setRecordedAudio(audioBuffer);
-        // Clear subsequent stages when new input arrives
-        setEncodedAudio(null);
-        setDecodedAudio(null);
-        
+        if (mediaStreamSourceRef.current) {
+             try { mediaStreamSourceRef.current.disconnect(); } catch(e) {}
+             mediaStreamSourceRef.current = null;
+        }
         stream.getTracks().forEach(track => track.stop());
+
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        try {
+            const arrayBuffer = await blob.arrayBuffer();
+            const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+            setRecordedAudio(audioBuffer);
+            setEncodedAudio(null);
+            setDecodedAudio(null);
+            setStatus('RECORDED');
+        } catch (e) {
+            setStatus('ERROR');
+        }
         setMode('idle');
         cancelAnimationFrame(animationRef.current);
-        setStatus('Recording saved. Ready to encode.');
+        drawBars(false);
       };
       
       mediaRecorderRef.current.start();
       setMode('recording');
-      setStatus('Recording... Speak slowly for best results');
+      setStatus('RECORDING');
       
       const animate = () => {
         if (mediaRecorderRef.current?.state === 'recording') {
-            drawSpectrogram(THEME_COLORS.input);
+            drawBars(true);
             animationRef.current = requestAnimationFrame(animate);
         }
       };
       animationRef.current = requestAnimationFrame(animate);
-      
-    } catch (err: any) {
-      setStatus('Error accessing microphone: ' + err.message);
+
+    } catch (err) {
+      console.error(err);
+      setStatus('MIC PERMISSION');
     }
   };
 
@@ -152,354 +198,319 @@ export default function BirdsongCodec() {
     }
   };
 
-  const encodeTobirdsong = async () => {
+  const encode = async () => {
     if (!recordedAudio) return;
     stopAudio();
-
-    setIsProcessing(true);
-    setStatus('Generating carrier & modulating amplitude...');
-
-    // Small delay to allow UI to update
-    await new Promise(resolve => setTimeout(resolve, 50));
+    setMode('encoding');
+    setStatus('ENCRYPTING...');
+    
+    await new Promise(r => setTimeout(r, 100)); // UI Render
 
     try {
-      const outputBuffer = await AudioService.encodeToBirdsong(recordedAudio);
-      setEncodedAudio(outputBuffer);
-      setDecodedAudio(null); // Invalidate old decode
-      setStatus('Encoded to birdsong! Ready to play.');
-    } catch (error) {
-      console.error(error);
-      setStatus('Encoding failed.');
-    } finally {
-      setIsProcessing(false);
-    }
+      const out = await AudioService.encodeToBirdsong(recordedAudio);
+      setEncodedAudio(out);
+      setDecodedAudio(null);
+      setStatus('ENCRYPTED');
+      setMode('idle');
+    } catch (e) { 
+        setStatus('ERROR'); 
+        setMode('idle');
+    } 
   };
 
-  const decodeFrombirdsong = async () => {
+  const decode = async () => {
     if (!encodedAudio) return;
     stopAudio();
-
-    setIsProcessing(true);
-    setStatus('Recovering envelope via Rectification & LPF...');
-
-    await new Promise(resolve => setTimeout(resolve, 50));
+    setMode('decoding');
+    setStatus('REVIVING...');
+    await new Promise(r => setTimeout(r, 100));
 
     try {
-      const outputBuffer = await AudioService.decodeFromBirdsong(encodedAudio);
-      setDecodedAudio(outputBuffer);
-      setStatus('Decoded! Play to hear reconstructed speech.');
-    } catch (error) {
-      console.error(error);
-      setStatus('Decoding failed.');
-    } finally {
-      setIsProcessing(false);
+      const out = await AudioService.decodeFromBirdsong(encodedAudio);
+      setDecodedAudio(out);
+      setStatus('REVIVED');
+      setMode('idle');
+    } catch (e) { 
+        setStatus('ERROR'); 
+        setMode('idle');
     }
   };
 
-  const playAudio = async (buffer: AudioBuffer, type: 'input' | 'encoded' | 'decoded') => {
+  const play = async (buffer: AudioBuffer, type: 'input' | 'encoded' | 'decoded') => {
+    if (activePlayback === type) {
+        stopAudio();
+        return; 
+    }
+    
     stopAudio();
     const ctx = AudioService.getAudioContext();
-    if (ctx.state === 'suspended') {
-      await ctx.resume();
-    }
+    if (ctx.state === 'suspended') await ctx.resume();
     
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     sourceRef.current = source;
     
-    if (!analyserRef.current) {
-        analyserRef.current = ctx.createAnalyser();
-        analyserRef.current.fftSize = 2048;
-    }
-    
-    source.connect(analyserRef.current);
-    analyserRef.current.connect(ctx.destination);
+    const analyser = ensureAnalyser();
+    source.connect(analyser);
+    analyser.connect(ctx.destination);
     
     source.onended = () => {
         setMode('idle');
+        setActivePlayback(null);
         cancelAnimationFrame(animationRef.current);
         sourceRef.current = null;
+        drawBars(false);
     };
-
+    
     source.start();
     setMode('playing');
-
-    const color = THEME_COLORS[type];
+    setActivePlayback(type);
 
     const animate = () => {
-        drawSpectrogram(color);
+        drawBars(true);
         animationRef.current = requestAnimationFrame(animate);
     };
     animationRef.current = requestAnimationFrame(animate);
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // --- Upload Handling (iOS Compatible) ---
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, isArtifact: boolean) => {
     const file = e.target.files?.[0];
     if (!file) return;
     stopAudio();
-
     try {
         const ctx = AudioService.getAudioContext();
-        const arrayBuffer = await file.arrayBuffer();
-        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-
-        // Simple heuristic to guess if file is encoded
-        if (file.name.toLowerCase().includes('bird') || file.name.toLowerCase().includes('encoded')) {
-          setEncodedAudio(audioBuffer);
-          setRecordedAudio(null);
-          setDecodedAudio(null);
-          setStatus('Birdsong loaded. Ready to decode.');
-          playAudio(audioBuffer, 'encoded'); 
+        if (ctx.state === 'suspended') await ctx.resume();
+        const ab = await file.arrayBuffer();
+        const buffer = await ctx.decodeAudioData(ab);
+        
+        if (isArtifact) {
+            setEncodedAudio(buffer);
+            setRecordedAudio(null);
+            setDecodedAudio(null);
+            setStatus('ARTIFACT LOADED');
+            play(buffer, 'encoded');
         } else {
-          setRecordedAudio(audioBuffer);
-          setEncodedAudio(null);
-          setDecodedAudio(null);
-          setStatus('Audio loaded. Ready to encode.');
-          playAudio(audioBuffer, 'input');
+            setRecordedAudio(buffer);
+            setEncodedAudio(null);
+            setDecodedAudio(null);
+            setStatus('SOURCE LOADED');
+            play(buffer, 'input');
         }
-    } catch (err) {
-        setStatus('Error loading file. Format not supported.');
-    }
+    } catch (e) { setStatus('INVALID WAV'); }
   };
-
-  const handleDownloadAll = async () => {
-    const now = new Date().toISOString().slice(0,19).replace(/:/g,"-");
-    
-    if (recordedAudio) {
-        AudioService.downloadBuffer(recordedAudio, `blackbird_${now}_1_source.wav`);
-        await new Promise(r => setTimeout(r, 800)); 
-    }
-    if (encodedAudio) {
-        AudioService.downloadBuffer(encodedAudio, `blackbird_${now}_2_artifact.wav`);
-        await new Promise(r => setTimeout(r, 800));
-    }
-    if (decodedAudio) {
-        AudioService.downloadBuffer(decodedAudio, `blackbird_${now}_3_decoded.wav`);
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      cancelAnimationFrame(animationRef.current);
-      if (sourceRef.current) {
-          try { sourceRef.current.stop(); } catch(e) {}
-      }
-    };
-  }, []);
 
   return (
-    <div className="min-h-screen bg-[#050505] text-white p-6 font-mono flex items-center justify-center">
-      <div className="max-w-4xl w-full">
-        <header className="mb-8 text-center">
-            <div className="inline-flex items-center justify-center p-3 bg-gray-900 rounded-full mb-4 border border-gray-800">
-                <Music className="w-6 h-6 text-emerald-500 mr-2" />
-                <span className="text-gray-500">↔</span>
-                <span className="text-2xl ml-2">🐦</span>
-            </div>
-            <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-emerald-400 via-amber-400 to-violet-400 bg-clip-text text-transparent tracking-tight">
-            BLACKBIRD CODEC
-            </h1>
-            <p className="text-gray-500 text-sm uppercase tracking-widest">
-            Acoustic Cryptography • Reversible Speech-to-Song
-            </p>
-        </header>
+    <div className="fixed inset-0 bg-[#050505] text-[#e5e5e5] font-mono flex flex-col safe-pt safe-pb p-4 gap-4 overflow-hidden select-none">
+        
+        {/* Background Grid */}
+        <div className="absolute inset-0 bg-grid-pattern opacity-40 pointer-events-none" />
 
-        <div className="bg-[#0a0a0a] border border-gray-800 rounded-xl p-1 mb-6 shadow-2xl relative overflow-hidden group ring-1 ring-gray-800/50">
-          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-emerald-500 via-amber-500 to-violet-500 opacity-20"></div>
-          {/* Spectrogram Canvas */}
-          <canvas 
-            ref={canvasRef}
-            width={800}
-            height={200}
-            className="w-full h-48 rounded-lg bg-[#020202]"
-          />
-          <div className="absolute top-4 left-4 text-[10px] text-gray-600 font-bold tracking-widest pointer-events-none select-none">
-             SPECTRAL ANALYSIS // {mode.toUpperCase()}
-          </div>
-        </div>
-        
-        <div className="bg-[#0a0a0a] border border-gray-800 rounded-lg p-3 mb-8 flex justify-center items-center">
-          <div className={`w-2 h-2 rounded-full mr-3 ${isProcessing ? 'bg-amber-500 animate-ping' : 'bg-emerald-500'}`}></div>
-          <p className="text-xs uppercase tracking-wider text-gray-300">
-             {status}
-          </p>
-        </div>
-        
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          {/* Input Section */}
-          <div className="bg-[#0a0a0a] border border-gray-800 rounded-xl p-5 hover:border-emerald-900 transition-all duration-300 group">
-            <h2 className="text-emerald-500 font-bold mb-4 flex items-center gap-2 text-sm uppercase tracking-wider">
-              1. Input Source
-            </h2>
-            <div className="space-y-3">
-              <button
-                onClick={mode === 'recording' ? stopRecording : startRecording}
-                disabled={isProcessing}
-                className={`w-full py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide transition-all border flex items-center justify-center gap-2 ${
-                  mode === 'recording'
-                    ? 'bg-red-900/20 border-red-500/50 text-red-500 animate-pulse'
-                    : 'bg-emerald-900/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-900/20 hover:border-emerald-400'
-                }`}
-              >
-                {mode === 'recording' ? <Square size={14} /> : <Mic size={14} />}
-                {mode === 'recording' ? 'Stop' : 'Record Speech'}
-              </button>
-              
-              <label className="w-full py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-900/50 border border-gray-700 text-gray-400 hover:bg-gray-800 hover:border-gray-600 cursor-pointer text-center transition-all flex items-center justify-center gap-2">
-                <Upload size={14} />
-                Upload Audio
-                <input
-                  type="file"
-                  accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-              </label>
-              
-              {recordedAudio && (
-                <div className="flex gap-2">
-                    <button
-                    onClick={() => playAudio(recordedAudio, 'input')}
-                    className="flex-1 py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all flex items-center justify-center gap-2"
-                    >
-                    <Play size={14} /> Play
-                    </button>
-                    <button
-                    onClick={() => AudioService.downloadBuffer(recordedAudio, 'source_speech.wav')}
-                    className="flex-shrink-0 py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all flex items-center justify-center"
-                    >
-                    <Download size={14} />
-                    </button>
+        {/* 1. SPECTRAL ANALYSIS (Visualizer) */}
+        <div className="flex-[1.5] min-h-0 relative bg-[#0A0A0A] rounded-[32px] border border-white/5 overflow-hidden flex flex-col">
+             {/* Header */}
+            <div className="absolute top-6 left-6 right-6 flex justify-between items-center z-20">
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#666]">Spectral Analysis</span>
+                <div className="flex items-center gap-2">
+                    <div className={`w-1.5 h-1.5 rounded-full ${mode === 'recording' || activePlayback ? 'bg-yellow-500 animate-pulse' : 'bg-[#333]'}`} />
+                    <span className={`text-[10px] tracking-widest font-bold ${mode === 'recording' || activePlayback ? 'text-yellow-500' : 'text-[#333]'}`}>
+                        {status}
+                    </span>
                 </div>
-              )}
-            </div>
-          </div>
-          
-          {/* Encoder Section */}
-          <div className="bg-[#0a0a0a] border border-gray-800 rounded-xl p-5 hover:border-amber-900 transition-all duration-300 group">
-            <h2 className="text-amber-500 font-bold mb-4 flex items-center gap-2 text-sm uppercase tracking-wider">
-              2. Encrypt
-            </h2>
-            <div className="space-y-3">
-              <button
-                onClick={encodeTobirdsong}
-                disabled={!recordedAudio || isProcessing}
-                className="w-full py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-amber-900/10 border border-amber-500/30 text-amber-400 hover:bg-amber-900/20 hover:border-amber-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
-              >
-                <RefreshCw size={14} className={isProcessing ? "animate-spin" : ""} />
-                Encode to Bird
-              </button>
-              
-              {encodedAudio && (
-                <div className="flex gap-2">
-                    <button
-                        onClick={() => playAudio(encodedAudio, 'encoded')}
-                        className="flex-1 py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all flex items-center justify-center gap-2"
-                    >
-                        <Play size={14} /> Play
-                    </button>
-                    <button
-                        onClick={() => AudioService.downloadBuffer(encodedAudio, 'blackbird_artifact.wav')}
-                        className="flex-shrink-0 py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all flex items-center justify-center"
-                    >
-                        <Download size={14} />
-                    </button>
-                </div>
-              )}
-            </div>
-          </div>
-          
-          {/* Decoder Section */}
-          <div className="bg-[#0a0a0a] border border-gray-800 rounded-xl p-5 hover:border-violet-900 transition-all duration-300 group">
-            <h2 className="text-violet-500 font-bold mb-4 flex items-center gap-2 text-sm uppercase tracking-wider">
-              3. Decrypt
-            </h2>
-            <div className="space-y-3">
-              <button
-                onClick={decodeFrombirdsong}
-                disabled={!encodedAudio || isProcessing}
-                className="w-full py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-violet-900/10 border border-violet-500/30 text-violet-400 hover:bg-violet-900/20 hover:border-violet-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
-              >
-                <RefreshCw size={14} className={isProcessing ? "animate-spin" : ""} />
-                Decode to Speech
-              </button>
-              
-              {decodedAudio && (
-                <div className="flex gap-2">
-                    <button
-                        onClick={() => playAudio(decodedAudio, 'decoded')}
-                        className="flex-1 py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all flex items-center justify-center gap-2"
-                    >
-                        <Play size={14} /> Play
-                    </button>
-                    <button
-                        onClick={() => AudioService.downloadBuffer(decodedAudio, 'decrypted_speech.wav')}
-                        className="flex-shrink-0 py-3 px-4 rounded-lg font-bold text-xs uppercase tracking-wide bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all flex items-center justify-center"
-                    >
-                        <Download size={14} />
-                    </button>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Global Action Bar */}
-        {(recordedAudio && encodedAudio && decodedAudio) && (
-            <div className="flex justify-center mb-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                <button
-                    onClick={handleDownloadAll}
-                    className="group relative inline-flex items-center gap-3 px-8 py-4 bg-gray-800 hover:bg-gray-700 border border-gray-600 hover:border-gray-500 rounded-full transition-all"
-                >
-                    <div className="absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500/20 via-amber-500/20 to-violet-500/20 blur opacity-0 group-hover:opacity-100 transition-opacity" />
-                    <FileAudio size={18} className="text-gray-300" />
-                    <span className="font-bold text-sm uppercase tracking-wider text-white">Download All Session Files</span>
-                    <Download size={18} className="text-gray-300 group-hover:translate-y-0.5 transition-transform" />
-                </button>
-            </div>
-        )}
-        
-        {/* Info / How it works */}
-        <div className="bg-[#0a0a0a] border border-gray-800 rounded-xl p-6 text-gray-400 cursor-pointer hover:bg-gray-900/30 transition-colors" onClick={() => setShowInfo(!showInfo)}>
-            <div className="flex items-center justify-between mb-4">
-                 <h3 className="text-gray-300 font-bold flex items-center gap-2 uppercase tracking-wider text-sm">
-                    <Info size={16} /> How it works
-                 </h3>
-                 <span className="text-xs text-gray-600">{showInfo ? 'Collapse' : 'Expand'}</span>
             </div>
             
-            {showInfo && (
-                <div className="animate-in fade-in duration-300">
-                    <Diagram />
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8 text-xs leading-relaxed mt-4">
-                        <div>
-                        <h4 className="text-emerald-500 font-bold mb-2 uppercase tracking-wider">Encoding (Speech → AM Bird)</h4>
-                        <ul className="list-disc list-inside text-gray-500 space-y-2">
-                            <li>Band-limits speech to 2.5kHz (Phone quality).</li>
-                            <li>Extracts pitch and maps it to a high-frequency carrier (3kHz - 7kHz).</li>
-                            <li>Modulates the <strong>Amplitude</strong> of the carrier with the speech envelope.</li>
-                            <li>The result is a chirping carrier that contains the full speech waveform in its volume.</li>
-                        </ul>
-                        </div>
-                        <div>
-                        <h4 className="text-violet-500 font-bold mb-2 uppercase tracking-wider">Decoding (Envelope Detection)</h4>
-                        <ul className="list-disc list-inside text-gray-500 space-y-2">
-                            <li>Takes the absolute value (rectification) of the bird song.</li>
-                            <li>Applies a Low Pass Filter at 2.8kHz to remove the high-frequency carrier.</li>
-                            <li>Removes DC offset to center the waveform.</li>
-                            <li>Result: Crystal clear intelligible speech, regardless of carrier chirps.</li>
-                        </ul>
-                        </div>
-                    </div>
-                </div>
-            )}
-            {!showInfo && (
-                <p className="text-xs text-gray-600">
-                    Click to reveal the acoustic steganography algorithm details...
-                </p>
-            )}
+            {/* Bars Canvas */}
+            <div className="flex-1 w-full relative flex items-end justify-center px-6 pb-0">
+                 <canvas ref={canvasRef} className="w-full h-[80%] block opacity-90" />
+            </div>
+
+            {/* Info Button */}
+            <button 
+                onClick={() => setShowInfo(true)}
+                className="absolute top-6 right-6 p-2 -mr-2 -mt-2 text-[#333] hover:text-white transition-colors z-30"
+            >
+                <Info size={16} />
+            </button>
         </div>
-      </div>
+
+        {/* 2. ACTION GRID */}
+        <div className="flex-1 min-h-[220px] grid grid-cols-2 gap-4">
+            
+            {/* ENCRYPTION CARD */}
+            <div className={`
+                relative bg-[#0A0A0A] rounded-[32px] flex flex-col items-center justify-center gap-5
+                border transition-all duration-300 group
+                ${mode === 'recording' ? 'border-yellow-500/50 shadow-[0_0_40px_-10px_rgba(234,179,8,0.3)]' : 'border-white/5'}
+            `}>
+                {/* Upload Action */}
+                <label className="absolute top-5 right-5 w-8 h-8 flex items-center justify-center rounded-full bg-[#151515] text-[#444] hover:text-white hover:bg-[#222] transition-colors cursor-pointer border border-white/5 active:scale-90 z-20">
+                    <Upload size={12} />
+                    <input type="file" accept=".wav,audio/wav,audio/*" onChange={(e) => handleUpload(e, false)} className="hidden" />
+                </label>
+
+                <div className="absolute top-5 left-6">
+                    <span className={`text-[9px] font-bold uppercase tracking-[0.2em] ${mode === 'recording' ? 'text-yellow-500' : 'text-[#555]'}`}>
+                        Encryption
+                    </span>
+                </div>
+
+                {/* Main Action Button */}
+                {!recordedAudio ? (
+                    <button
+                        onMouseDown={startRecording}
+                        onMouseUp={stopRecording}
+                        onTouchStart={startRecording}
+                        onTouchEnd={stopRecording}
+                        className={`
+                            w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200
+                            ${mode === 'recording' 
+                                ? 'bg-yellow-500 text-black scale-110 shadow-lg' 
+                                : 'bg-yellow-500 text-black hover:scale-105 hover:brightness-110 shadow-[0_0_20px_rgba(234,179,8,0.2)]'}
+                        `}
+                    >
+                        {mode === 'recording' ? <Square size={24} fill="currentColor" /> : <Mic size={28} />}
+                    </button>
+                ) : (
+                     <button
+                        onClick={encode}
+                        disabled={mode === 'encoding'}
+                        className={`
+                            w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200
+                            bg-yellow-500 text-black animate-in zoom-in
+                            ${mode === 'encoding' ? 'animate-pulse' : 'hover:scale-105'}
+                        `}
+                    >
+                        <Zap size={28} fill={mode === 'encoding' ? "currentColor" : "none"} />
+                    </button>
+                )}
+
+                <span className={`text-[10px] uppercase tracking-widest font-bold ${mode === 'recording' ? 'text-yellow-500' : 'text-[#444]'}`}>
+                    {mode === 'recording' ? 'Recording...' : recordedAudio ? (mode === 'encoding' ? 'Encrypting...' : 'Encrypt') : 'Hold to Record'}
+                </span>
+                
+                {recordedAudio && !mode && (
+                    <button onClick={() => setRecordedAudio(null)} className="absolute bottom-4 text-[9px] text-red-500/40 hover:text-red-500 uppercase tracking-widest px-4 py-2">
+                        Discard
+                    </button>
+                )}
+            </div>
+
+            {/* DECRYPTION CARD */}
+            <div className={`
+                relative bg-[#0A0A0A] rounded-[32px] flex flex-col items-center justify-center gap-5 border 
+                transition-all duration-300
+                ${encodedAudio ? 'border-violet-500/30 shadow-[0_0_30px_-10px_rgba(139,92,246,0.15)]' : 'border-white/5'}
+            `}>
+                 {/* Upload Action */}
+                <label className="absolute top-5 right-5 w-8 h-8 flex items-center justify-center rounded-full bg-[#151515] text-[#444] hover:text-white hover:bg-[#222] transition-colors cursor-pointer border border-white/5 active:scale-90 z-20">
+                    <Upload size={12} />
+                    <input type="file" accept=".wav,audio/wav,audio/*" onChange={(e) => handleUpload(e, true)} className="hidden" />
+                </label>
+
+                <div className="absolute top-5 left-6">
+                    <span className={`text-[9px] font-bold uppercase tracking-[0.2em] ${encodedAudio ? 'text-violet-500' : 'text-[#555]'}`}>
+                        Decryption
+                    </span>
+                </div>
+
+                <button
+                    onClick={decode}
+                    disabled={!encodedAudio || mode === 'decoding'}
+                    className={`
+                        w-20 h-20 rounded-full flex items-center justify-center transition-all duration-200
+                        ${encodedAudio 
+                            ? 'bg-violet-600 text-white shadow-[0_0_20px_rgba(124,58,237,0.4)] hover:scale-105 hover:bg-violet-500' 
+                            : 'bg-[#121212] text-[#333] border border-white/5 cursor-not-allowed'}
+                        ${mode === 'decoding' ? 'animate-pulse' : ''}
+                    `}
+                >
+                    {encodedAudio ? <Unlock size={28} /> : <Lock size={28} />}
+                </button>
+
+                <span className={`text-[10px] uppercase tracking-widest font-bold ${encodedAudio ? 'text-violet-400' : 'text-[#444]'}`}>
+                    {mode === 'decoding' ? 'Reviving...' : encodedAudio ? 'Revive Audio' : 'Waiting...'}
+                </span>
+            </div>
+
+        </div>
+
+        {/* 3. ARTIFACT PLAYER */}
+        <div className="h-[96px] shrink-0 bg-[#0A0A0A] rounded-[24px] border border-white/5 flex items-center px-6 gap-5 relative overflow-hidden group">
+             {/* Progress Bar Background */}
+             <div className="absolute bottom-0 left-0 h-1 bg-white/5 w-full" />
+             {/* Active Progress */}
+             {activePlayback && (
+                <div className="absolute bottom-0 left-0 h-1 bg-yellow-500/80 w-1/3 animate-[pulse_2s_infinite]" />
+             )}
+
+             {/* Play Icon Box */}
+             <div className={`
+                w-14 h-14 rounded-[18px] flex items-center justify-center shrink-0 transition-all duration-300
+                ${activePlayback ? 'bg-yellow-500 text-black shadow-[0_0_20px_-5px_rgba(234,179,8,0.4)]' : 'bg-[#151515] text-[#333] border border-white/5'}
+             `}>
+                {activePlayback ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}
+             </div>
+
+             {/* Info */}
+             <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
+                <div className="text-sm font-bold truncate text-[#e5e5e5] tracking-tight">
+                    {decodedAudio ? "revived_audio.wav" : encodedAudio ? "artifact_specimen.wav" : recordedAudio ? "source_input.wav" : "No File Loaded"}
+                </div>
+                <div className="flex items-center gap-2">
+                    <span className="text-[9px] bg-[#1A1A1A] text-[#666] px-1.5 py-0.5 rounded-[4px] uppercase font-bold tracking-wider border border-white/5">
+                        {encodedAudio || decodedAudio || recordedAudio ? "WAV" : "EMPTY"}
+                    </span>
+                    <span className="text-[10px] text-[#444] font-mono">
+                        {(decodedAudio || encodedAudio || recordedAudio)?.duration.toFixed(2) || "--"}s
+                    </span>
+                </div>
+             </div>
+
+             {/* Actions */}
+             <div className="flex items-center gap-3">
+                 {/* Invisible Full Click Area for Play Toggle */}
+                 <button 
+                    onClick={() => {
+                        if (decodedAudio) play(decodedAudio, 'decoded');
+                        else if (encodedAudio) play(encodedAudio, 'encoded');
+                        else if (recordedAudio) play(recordedAudio, 'input');
+                    }}
+                    disabled={!encodedAudio && !recordedAudio && !decodedAudio}
+                    className="absolute inset-0 z-10 cursor-pointer"
+                    aria-label="Play Toggle"
+                 />
+
+                 {/* Download (Z-Index above play toggle) */}
+                 <button 
+                    onClick={(e) => {
+                        e.stopPropagation(); 
+                        if (decodedAudio) AudioService.downloadBuffer(decodedAudio, 'revived.wav');
+                        else if (encodedAudio) AudioService.downloadBuffer(encodedAudio, 'artifact.wav');
+                        else if (recordedAudio) AudioService.downloadBuffer(recordedAudio, 'source.wav');
+                    }}
+                    disabled={!encodedAudio && !recordedAudio && !decodedAudio}
+                    className="w-10 h-10 rounded-full flex items-center justify-center text-[#444] hover:text-white hover:bg-[#222] z-20 transition-colors active:scale-90"
+                >
+                    <Download size={20} />
+                 </button>
+             </div>
+        </div>
+
+      {/* Info Modal */}
+      {showInfo && (
+        <div className="fixed inset-0 z-50 bg-black/95 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in duration-200">
+            <div className="w-full max-w-lg bg-[#0A0A0A] border border-white/10 rounded-3xl p-6 shadow-2xl">
+                <div className="flex justify-between items-center mb-6">
+                     <h2 className="text-lg font-bold text-white tracking-tight">Codec Architecture</h2>
+                     <button onClick={() => setShowInfo(false)} className="w-8 h-8 flex items-center justify-center rounded-full bg-[#151515] text-[#666] hover:text-white">
+                        <X size={18} />
+                     </button>
+                </div>
+                <Diagram />
+            </div>
+        </div>
+      )}
+
     </div>
   );
 }
