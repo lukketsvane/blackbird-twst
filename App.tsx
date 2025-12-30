@@ -4,6 +4,7 @@ import { Diagram } from './components/Diagram';
 import { Download, Play, Mic, Square, Upload, Lock, Unlock, Zap, Info, X, Pause, Activity } from 'lucide-react';
 
 type Mode = 'idle' | 'recording' | 'playing' | 'encoding' | 'decoding';
+type VisualizerMode = 'bars' | 'spectrogram';
 
 export default function BirdsongCodec() {
   const [mode, setMode] = useState<Mode>('idle');
@@ -17,6 +18,7 @@ export default function BirdsongCodec() {
   // UI State
   const [showInfo, setShowInfo] = useState(false);
   const [activePlayback, setActivePlayback] = useState<'input'|'encoded'|'decoded'|null>(null);
+  const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('bars');
 
   // Audio Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -71,10 +73,12 @@ export default function BirdsongCodec() {
       mediaStreamSourceRef.current = null;
     }
     setActivePlayback(null);
+    // Reset visualizer to idle state
+    drawVisualizer(false);
   };
 
   // --- High Contrast Visualizer ---
-  const drawBars = (isActive: boolean) => {
+  const drawVisualizer = (isActive: boolean) => {
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
     if (!canvas || !analyser) return;
@@ -85,37 +89,73 @@ export default function BirdsongCodec() {
     const width = canvas.width;
     const height = canvas.height;
     
-    // Clear
-    ctx.clearRect(0, 0, width, height);
-
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     analyser.getByteFrequencyData(dataArray);
 
-    const barCount = 64; // More bars for density
-    const step = Math.floor(bufferLength / barCount);
-    const barWidth = (width / barCount); 
+    if (visualizerMode === 'bars') {
+        // Clear
+        ctx.clearRect(0, 0, width, height);
 
-    ctx.fillStyle = isActive ? '#FFFFFF' : '#333333';
+        const barCount = 64; // More bars for density
+        const step = Math.floor(bufferLength / barCount);
+        const barWidth = (width / barCount); 
 
-    for (let i = 0; i < barCount; i++) {
-        let sum = 0;
-        for (let j=0; j<step; j++) {
-            sum += dataArray[i*step + j];
+        ctx.fillStyle = isActive ? '#FFFFFF' : '#333333';
+
+        for (let i = 0; i < barCount; i++) {
+            let sum = 0;
+            for (let j=0; j<step; j++) {
+                sum += dataArray[i*step + j];
+            }
+            const avg = sum / step;
+
+            // Sharp, mechanical movement
+            const val = isActive 
+                ? (avg / 255) 
+                : 0.05; 
+
+            const barHeight = Math.max(2, val * height);
+            const x = i * barWidth;
+            const y = height - barHeight;
+
+            // Crisp Rectangles
+            ctx.fillRect(x, y, barWidth - 2, barHeight); // -2 for gap
         }
-        const avg = sum / step;
+    } else {
+        // SPECTROGRAM MODE
+        if (!isActive) return;
 
-        // Sharp, mechanical movement
-        const val = isActive 
-            ? (avg / 255) 
-            : 0.05; 
+        // Shift canvas content to the left
+        ctx.drawImage(canvas, -2, 0);
 
-        const barHeight = Math.max(2, val * height);
-        const x = i * barWidth;
-        const y = height - barHeight;
+        // Draw new column at the right edge
+        const stripWidth = 2;
+        const x = width - stripWidth;
+        
+        // Clear the new strip (background black)
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(x, 0, stripWidth, height);
 
-        // Crisp Rectangles
-        ctx.fillRect(x, y, barWidth - 2, barHeight); // -2 for gap
+        // Draw frequency bins mapped to brightness
+        // We use the full resolution of the FFT (256 bins)
+        const barHeight = height / bufferLength;
+
+        for (let i = 0; i < bufferLength; i++) {
+            const value = dataArray[i];
+            const percent = value / 255;
+            
+            // Grayscale intensity
+            const brightness = Math.floor(percent * 255);
+            ctx.fillStyle = `rgb(${brightness}, ${brightness}, ${brightness})`;
+
+            // Draw from bottom (low freq) to top (high freq)
+            const y = height - ((i + 1) * barHeight); 
+            // Ensure at least 1px height to avoid gaps
+            const h = Math.max(1, barHeight);
+            
+            ctx.fillRect(x, y, stripWidth, h);
+        }
     }
   };
 
@@ -157,7 +197,7 @@ export default function BirdsongCodec() {
         }
         setMode('idle');
         cancelAnimationFrame(animationRef.current);
-        drawBars(false);
+        drawVisualizer(false);
       };
       
       mediaRecorderRef.current.start();
@@ -166,7 +206,7 @@ export default function BirdsongCodec() {
       
       const animate = () => {
         if (mediaRecorderRef.current?.state === 'recording') {
-            drawBars(true);
+            drawVisualizer(true);
             animationRef.current = requestAnimationFrame(animate);
         }
       };
@@ -245,7 +285,7 @@ export default function BirdsongCodec() {
         setActivePlayback(null);
         cancelAnimationFrame(animationRef.current);
         sourceRef.current = null;
-        drawBars(false);
+        drawVisualizer(false);
     };
     
     source.start();
@@ -253,7 +293,7 @@ export default function BirdsongCodec() {
     setActivePlayback(type);
 
     const animate = () => {
-        drawBars(true);
+        drawVisualizer(true);
         animationRef.current = requestAnimationFrame(animate);
     };
     animationRef.current = requestAnimationFrame(animate);
@@ -285,6 +325,29 @@ export default function BirdsongCodec() {
     } catch (e) { setStatus('Invalid WAV'); }
   };
 
+  const toggleVisualizerMode = () => {
+      setVisualizerMode(prev => prev === 'bars' ? 'spectrogram' : 'bars');
+      // If we are currently idle, we want to clear the canvas or redraw the idle state
+      if (mode === 'idle') {
+          const canvas = canvasRef.current;
+          if (canvas) {
+              const ctx = canvas.getContext('2d');
+              ctx?.clearRect(0, 0, canvas.width, canvas.height);
+              if (visualizerMode === 'spectrogram') {
+                  setTimeout(() => drawVisualizer(false), 0);
+              }
+          }
+      }
+  };
+  
+  // Effect to handle mode switch cleanup/setup if needed
+  useEffect(() => {
+     if (mode === 'idle') {
+        // Redraw idle state when mode changes
+        drawVisualizer(false);
+     }
+  }, [visualizerMode]);
+
   return (
     <div className="fixed inset-0 bg-black text-white flex flex-col safe-pt safe-pb p-4 gap-3 overflow-hidden select-none">
         
@@ -292,7 +355,13 @@ export default function BirdsongCodec() {
         <div className="flex-[1.2] min-h-0 relative bg-black rounded-lg border border-[#333] overflow-hidden flex flex-col">
              {/* Header */}
             <div className="absolute top-4 left-4 right-4 flex justify-between items-center z-20">
-                <span className="text-xs font-medium text-[#666] tracking-tight">Spectral Analysis</span>
+                <button 
+                    onClick={toggleVisualizerMode}
+                    className="text-xs font-medium text-[#666] tracking-tight hover:text-white transition-colors flex items-center gap-2"
+                >
+                    {visualizerMode === 'bars' ? 'Spectral Analysis' : 'Spectrogram'}
+                    <Activity size={10} className={visualizerMode === 'spectrogram' ? 'text-white' : 'text-[#333]'} />
+                </button>
                 <div className="flex items-center gap-2">
                     <div className={`w-1.5 h-1.5 rounded-full ${mode === 'recording' || activePlayback ? 'bg-white' : 'bg-[#333]'}`} />
                     <span className={`text-xs font-mono font-medium ${mode === 'recording' || activePlayback ? 'text-white' : 'text-[#444]'}`}>
@@ -302,7 +371,7 @@ export default function BirdsongCodec() {
             </div>
             
             {/* Bars Canvas */}
-            <div className="flex-1 w-full relative flex items-end justify-center px-4 pb-0">
+            <div className={`flex-1 w-full relative flex ${visualizerMode === 'bars' ? 'items-end' : 'items-stretch'} justify-center px-4 pb-0`}>
                  <canvas ref={canvasRef} className="w-full h-[70%] block" />
             </div>
 
