@@ -427,7 +427,7 @@ export default function App() {
         setProcessedAudio(buffer);
         setSourceAudio(null);
     } catch(e) {
-        console.error("Playback failed", e);
+        // Error silently handled
     }
   };
 

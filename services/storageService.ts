@@ -37,7 +37,7 @@ export const saveHistoryItem = async (item: HistoryItem): Promise<void> => {
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
-    console.error("Failed to save history:", e);
+    // Error silently handled
   }
 };
 
@@ -52,7 +52,6 @@ export const getHistoryItems = async (): Promise<HistoryItem[]> => {
       request.onerror = () => reject(request.error);
     });
   } catch (e) {
-    console.error("Failed to load history:", e);
     return [];
   }
 };
@@ -68,7 +67,7 @@ export const deleteHistoryItem = async (id: string): Promise<void> => {
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
-    console.error("Failed to delete item:", e);
+    // Error silently handled
   }
 };
 
@@ -83,6 +82,6 @@ export const clearAllHistory = async (): Promise<void> => {
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
-    console.error("Failed to clear history:", e);
+    // Error silently handled
   }
 };
