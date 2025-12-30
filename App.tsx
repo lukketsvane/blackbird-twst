@@ -1,10 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import * as AudioService from './services/audioService';
 import * as StorageService from './services/storageService';
-import { Diagram } from './components/Diagram';
 import { 
   Mic, Upload, Zap, Lock, Unlock, Play, Pause, 
-  Power, Download, Fingerprint, RefreshCw, X, Info,
+  Power, Download, Fingerprint, RefreshCw, X,
   History, Trash2, Calendar
 } from 'lucide-react';
 
@@ -24,7 +23,6 @@ export default function App() {
   const [processedAudio, setProcessedAudio] = useState<AudioBuffer | null>(null); // The result (birdsong or speech)
 
   // UI State
-  const [showInfo, setShowInfo] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [historyItems, setHistoryItems] = useState<StorageService.HistoryItem[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -349,9 +347,6 @@ export default function App() {
                         <History size={16} />
                         {historyItems.length > 0 && <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-amber-600 rounded-full" />}
                      </button>
-                     <button onClick={() => setShowInfo(true)} className="p-2 rounded-full hover:bg-[#111] text-[#444] hover:text-[#888] transition-colors">
-                        <Info size={16} />
-                     </button>
                      <div className={`w-3 h-3 rounded-full mt-2 ${appState !== 'idle' ? 'bg-amber-600 shadow-[0_0_8px_rgba(217,119,6,0.6)]' : 'bg-[#222]'}`} />
                 </div>
             </div>
@@ -434,7 +429,9 @@ export default function App() {
                                 </>
                              )}
                              {tab === 'decode' && (
-                                 <InputButton active={true} onClick={() => {}}>
+                                 <InputButton active={true} onClick={() => {
+                                     if(appState === 'idle') fileInputRef.current?.click();
+                                 }}>
                                      <Upload size={14} />
                                  </InputButton>
                              )}
@@ -573,22 +570,6 @@ export default function App() {
                             ))
                         )}
                     </div>
-                </div>
-            </div>
-        )}
-
-        {/* Info Modal */}
-        {showInfo && (
-            <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in duration-200">
-                <div className="w-full max-w-lg bg-[#0a0a0a] border border-[#333] rounded-2xl p-6 shadow-2xl relative">
-                    <button onClick={() => setShowInfo(false)} className="absolute top-4 right-4 text-[#444] hover:text-white">
-                        <X size={20} />
-                    </button>
-                    <div className="mb-6">
-                         <h2 className="text-lg font-bold text-amber-500 mb-1">SYSTEM SCHEMATICS</h2>
-                         <p className="text-xs text-[#666]">TURDUS-X1 AUDIO ENCRYPTION PATH</p>
-                    </div>
-                    <Diagram />
                 </div>
             </div>
         )}
