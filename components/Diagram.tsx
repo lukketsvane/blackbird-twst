@@ -29,7 +29,7 @@ export const Diagram = () => {
         <path d="M190 70 L220 70" stroke="#fff" strokeWidth="1.5" fill="none" markerEnd="url(#head-white)" />
         <rect x="220" y="50" width="60" height="40" stroke="#333" strokeWidth="1" fill="#111" />
         <text x="250" y="68" textAnchor="middle" fill="#fff" fontWeight="bold">Map</text>
-        <text x="250" y="82" textAnchor="middle" fill="#666" fontSize="8">3k-7kHz</text>
+        <text x="250" y="82" textAnchor="middle" fill="#666" fontSize="8">4k-8kHz</text>
 
         <path d="M280 70 L310 70" stroke="#fff" strokeWidth="1.5" fill="none" markerEnd="url(#head-white)" />
         <circle cx="330" cy="70" r="20" stroke="#333" strokeWidth="1" fill="#111" />
@@ -75,8 +75,8 @@ export const Diagram = () => {
         {/* Filtering */}
         <path d="M170 270 L210 270" stroke="#fff" strokeWidth="1.5" fill="none" markerEnd="url(#head-white)" />
         <rect x="210" y="250" width="60" height="40" stroke="#333" strokeWidth="1" fill="#111" />
-        <text x="240" y="268" textAnchor="middle" fill="white" fontSize="10">LPF</text>
-        <text x="240" y="282" textAnchor="middle" fill="#666" fontSize="8">2.8kHz</text>
+        <text x="240" y="268" textAnchor="middle" fill="white" fontSize="10">LPF x3</text>
+        <text x="240" y="282" textAnchor="middle" fill="#666" fontSize="8">Steep</text>
 
         {/* DC Block */}
         <path d="M270 270 L310 270" stroke="#fff" strokeWidth="1.5" fill="none" markerEnd="url(#head-white)" />
@@ -91,10 +91,9 @@ export const Diagram = () => {
 
         {/* Annotations */}
         <text x="550" y="240" fill="#444" fontSize="9">
-          <tspan x="550" dy="0">This method works because the</tspan>
-          <tspan x="550" dy="12">speech information is entirely</tspan>
-          <tspan x="550" dy="12">contained in the amplitude</tspan>
-          <tspan x="550" dy="12">envelope of the carrier.</tspan>
+          <tspan x="550" dy="0">Multiple filter stages ensure</tspan>
+          <tspan x="550" dy="12">complete removal of the</tspan>
+          <tspan x="550" dy="12">high-frequency carrier signal.</tspan>
         </text>
 
       </svg>

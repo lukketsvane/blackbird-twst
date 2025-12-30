@@ -8,9 +8,9 @@ export const HOP_SIZE = 256;
 // Speech is band-limited to 2.5kHz to ensure it fits below the carrier
 const SPEECH_LPF_CUTOFF = 2500; 
 // The carrier glides based on input pitch. 
-// Base 3kHz + (InputPitch * 15). 
-// e.g. 100Hz voice -> 4.5kHz bird tone. 200Hz voice -> 6kHz bird tone.
-const CARRIER_BASE_FREQ = 3000;
+// Base 4kHz + (InputPitch * 16). 
+// Increased to 4000Hz to allow better separation from the speech envelope during decoding.
+const CARRIER_BASE_FREQ = 4000;
 const CARRIER_PITCH_MULTIPLIER = 16.0;
 
 let audioContext: AudioContext | null = null;
@@ -205,11 +205,13 @@ export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<Audi
   // We use a robust Envelope Detector (AM Demodulation)
   // Logic: |Signal| -> LowPass -> DC Block
   
-  // Cutoff needs to be slightly higher than encoding LPF to capture the edge, 
-  // but lower than the Carrier frequency.
-  // Carrier min ~ 4000Hz. Encoding LPF ~ 2500Hz.
-  // Decoding LPF ~ 2800Hz is a good sweet spot.
-  const lpf = new LowPassFilter(2800, SAMPLE_RATE);
+  // Improvement: Cascaded Low Pass Filters
+  // To strictly remove the 4000Hz+ carrier while keeping the 2500Hz speech envelope,
+  // we chain multiple 2nd-order filters to create a steep 6th-order roll-off.
+  const lpf1 = new LowPassFilter(2500, SAMPLE_RATE);
+  const lpf2 = new LowPassFilter(2500, SAMPLE_RATE);
+  const lpf3 = new LowPassFilter(2500, SAMPLE_RATE);
+  
   const dcBlocker = new DCBlocker();
 
   for (let i = 0; i < totalLength; i++) {
@@ -219,9 +221,11 @@ export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<Audi
     // Because AM puts the signal in the magnitude of the carrier
     const rectified = Math.abs(sample);
 
-    // 2. Low Pass Filter
+    // 2. Steep Low Pass Filter Chain
     // Removes the high frequency carrier ripple, leaving the speech envelope
-    let recovered = lpf.process(rectified);
+    let recovered = lpf1.process(rectified);
+    recovered = lpf2.process(recovered);
+    recovered = lpf3.process(recovered);
 
     // 3. Remove DC Offset
     // The AM process added a +1.0 bias. The rectification keeps it positive.
@@ -229,7 +233,8 @@ export const decodeFromBirdsong = async (inputBuffer: AudioBuffer): Promise<Audi
     recovered = dcBlocker.process(recovered);
 
     // 4. Makeup Gain
-    outputData[i] = recovered * 4.0;
+    // Multiple LPF passes attenuate the signal slightly, so we boost gain.
+    outputData[i] = recovered * 8.0;
     
     if (i % 10000 === 0) await new Promise(r => setTimeout(r, 0));
   }
